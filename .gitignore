@@ -2,7 +2,6 @@
 # 构建脚本、测试脚本与 APK 打包工具都属于开发过程文件，
 # 仓库只发布源码（jni/）与面向用户的文档。
 build_variants.py
-test_lawn_zoom_tab_guards.py
 tests/
 tools/
 

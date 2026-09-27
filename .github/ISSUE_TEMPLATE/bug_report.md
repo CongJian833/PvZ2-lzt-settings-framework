@@ -11,7 +11,8 @@ assignees: ""
 - 游戏版本：国际版 9.8.1 / 其他（请注明）
 - 设备与 Android 版本：
 - CPU 架构：ARM64 / ARM32
-- Hook 版本：正式版 / Debug 版（v4x）
+- 构建模式：正式版 / Debug 版
+- 涉及模块：视角 / 语言 / 设置框架 / 其他
 
 **问题描述**
 
@@ -25,7 +26,7 @@ assignees: ""
 
 **日志片段**
 
-粘贴 `LawnZoomTab.log` 或 logcat 中与问题相关的片段（注意脱敏）。
+粘贴 `settingsframework.log` 或 logcat 中与问题相关的片段（注意脱敏）。
 
 **其他**
 

@@ -10,7 +10,7 @@ Fixes #（如有）
 
 - [ ] 正式版与 Debug 版双架构编译通过
 - [ ] （如涉及偏移量）已填写验证范围（进入关卡 / 设置页面 / 目标展示 / 恐龙关卡）
-- [ ] 源码开关 `lawn_zoom_tab::kDebugMode` 已恢复为 `false`
+- [ ] 源码开关 `lzt_config::kDebugMode` 已恢复为 `false`
 
 ## 兼容性影响
 

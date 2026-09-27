@@ -25,15 +25,15 @@ jobs:
         run: |
           "$ANDROID_NDK_HOME/ndk-build" NDK_PROJECT_PATH=. \
             APP_BUILD_SCRIPT=jni/Android.mk \
-            APP_APPLICATION_MK=jni/Application.mk \
+            NDK_APPLICATION_MK=jni/Application.mk \
             APP_ABI=${{ matrix.arch }}
 
       - name: Verify artifact
         run: |
-          test -f libs/${{ matrix.arch }}/libLawnZoomTab.so
-          file libs/${{ matrix.arch }}/libLawnZoomTab.so
+          test -f libs/${{ matrix.arch }}/libsettingsframework.so
+          file libs/${{ matrix.arch }}/libsettingsframework.so
 
       - uses: actions/upload-artifact@v4
         with:
-          name: libLawnZoomTab-${{ matrix.arch }}
-          path: libs/${{ matrix.arch }}/libLawnZoomTab.so
+          name: libsettingsframework-${{ matrix.arch }}
+          path: libs/${{ matrix.arch }}/libsettingsframework.so
