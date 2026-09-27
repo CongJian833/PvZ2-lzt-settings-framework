@@ -1,4 +1,4 @@
-# NDK 应用配置（LawnZoomTab）
+# NDK 应用配置（settingsframework）
 # 说明：配合 jni/Android.mk 使用；build_variants.py 与 CI 均依赖本文件。
 
 # 目标 ABI：arm64-v8a（ARM64）+ armeabi-v7a（ARM32）

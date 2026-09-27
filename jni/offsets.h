@@ -20,6 +20,16 @@
 // ============================================================
 
 // ============================================================
+//  双架构共用 Settings 常量（与架构无关的版本知识）
+//
+//  来源：《Android设置界面-Tab注册与分发总表》逆向结论：
+//  两架构原版 Tab/控件 id 均只占用 3~29 区间，30+ 空闲。
+// ============================================================
+constexpr uint32_t SETTINGS_BUILDVERSION_ID    = 6;  // Build Version Tab 的原版 id（默认注入锚点）
+constexpr uint32_t SETTINGS_ANCHOR_NEXT_TAB_ID = 7;  // 锚点后首个原版 Tab（Settings Help，注入插入点）
+constexpr uint32_t SETTINGS_FIRST_DYNAMIC_ID   = 30; // 框架动态 id 分配起点
+
+// ============================================================
 //  ARM64 (arm64-v8a) 偏移
 //
 //  IDA 验证方法：
@@ -38,7 +48,6 @@ constexpr uintptr_t OFF_SettingsAttach = 0xA4DA68;
 constexpr uintptr_t OFF_SettingsDispatch = 0xA501E0;
 constexpr uintptr_t OFF_SettingsDataSharing = 0xA4EA34; // sub_A4EA34：DataSharing 页面创建（dirty flag 重建入口）
 constexpr uintptr_t OFF_SettingsLayout = 0xA5084C;
-constexpr uint32_t SETTINGS_BUILDVERSION_ID = 6;  // Build Version Tab 的原版 id（作为插入锚点）
 constexpr uint32_t SETTINGS_VIEW_ANGLE_ID = 30;   // 本项目注入的"视角"Tab id（原版未占用）
 constexpr uintptr_t OFF_SettingsBuildVersionString = 0x1CBD3F0;
 constexpr uintptr_t OFF_SettingsBuildVersionIconNormal = 0x26A2DF0;
@@ -56,6 +65,9 @@ constexpr uintptr_t OFF_CheckboxCreate = 0xA4DEAC;
 constexpr uintptr_t OFF_ScrollAddRow = 0xA52458;
 constexpr uintptr_t OFF_SettingsAddWidget = 0xA4DA68;
 constexpr uintptr_t OFF_LocalizeKey = 0x14F3354;
+constexpr uintptr_t OFF_PERSISTENT_BANNER_REBUILD = 0x1301B08; // sub_1301B08：PersistentMessage 横幅文本重建
+                                                            // （按当前语言 localize OFFLINE/_CONTENT；
+                                                            //   仅 screen_bindings.cpp 使用，v7.37 迁出框架）
 constexpr uintptr_t OFF_PersistSave = 0x153E084;     // sub_153E084(manager,key*,value)：保存 bool 配置项
 constexpr uintptr_t OFF_PersistReadBool = 0x153E560; // sub_153E560(config,key*,out*)：读取 bool 配置项，返回是否命中
 constexpr uintptr_t OFF_PersistManager = 0x26C5ED8;  // qword_26C5ED8：持久化管理器指针全局
@@ -66,10 +78,48 @@ constexpr uintptr_t SETTINGS_PAGE_CONTAINER = 240;  // 0xF0 page+240 → tab 容
 constexpr uintptr_t SETTINGS_PAGE_DIRTY = 292;      // page+292 dirty flag（sub_A4E7B0 检查→调 sub_A4EA34）
 constexpr uintptr_t SETTINGS_PAGE_OWNER = 216;      // 0xD8 page+216 → owner
 constexpr uintptr_t SETTINGS_OWNER_CONTROLLER = 8;  // owner+8 → controller
+constexpr uintptr_t OFF_SETTINGS_TITLE_CTRL_VTABLE = 0x24E3EC0; // 0xD8 标题controller vtable(sub_A538F0)
+// 页内 controller 向量=std::vector{begin@216,end@224,cap@232}
+// (sub_A4C490:push 比较 *(+224)==*(+232) 判扩容、*(+224)+=8 推进=end 游标;
+//  v7.13 误用 224/232 导致解引用 end 游标→vtable 校验失败→静默返回)
+constexpr uintptr_t SETTINGS_PAGE_CTRL_VEC         = 216;   // 向量 begin(根标题=element[0])
+constexpr uintptr_t SETTINGS_PAGE_CTRL_VEC_END     = 224;   // 向量 end 游标
 constexpr uintptr_t SETTINGS_CONTROLLER_TITLE = 184;      // controller+184 标题字段（原版页面函数写入）
 constexpr uintptr_t SETTINGS_CONTROLLER_TITLE_HEAP = 200; // controller+200 标题字符串堆指针
 constexpr uintptr_t SETTINGS_CONTROLLER_CONTENT = 208;    // controller+208 挂载的 content（vtable+44 字段）
 constexpr uintptr_t SETTINGS_DISPATCH_GUARD = 184;        // page+184 dispatch 收尾 guard（诊断用，双架构同值）
+constexpr uintptr_t SETTINGS_VT_LAYOUT = 416;             // content vtable+416 五参 layout 槽（ARM32=208）
+constexpr uintptr_t SETTINGS_VT_SETPOS = 424;             // prompt 容器 vtable+424 setPos 槽（ARM32=212）
+constexpr uintptr_t SETTINGS_CONTENT_ALLOC = 0xF0;        // content operator new 大小（ARM32=0xA8）
+constexpr uintptr_t SETTINGS_CONTAINER_ALLOC = 0xD0;      // prompt 文本容器分配大小（ARM32=0x94）
+
+// --- B 方案：Sexy::ScrollWidget 可滚动内容容器（v7.26 起，仅 ARM64）---
+// 逆向来源（IDA，同 9.8.1 基址）：
+//   vtable off_260BFF0(vtab+416 layout=sub_16EF39C, vtab+88 AddChild=sub_1699E20)
+//   单参构造 sub_16EE994；双参构造 sub_16EE71C；对象 operator new 大小 0x1E8(=488)。
+//   layout(sub_16EF39C) 以内容尺寸(+312/+316) 对比视口(a1宽高-内边距-滚动条宽)
+//   决定是否需要滚动：结果存入 +468 标志；+308 为滚动轴 flags；+300/+304 为
+//   垂直/水平 mode(0=内容起点,2=居中,3=贴边)。画滚动条判定依此。
+constexpr uintptr_t OFF_ScrollWidgetCtor   = 0x16EE994;   // ScrollWidget 单参构造(obj)
+constexpr uintptr_t OFF_ScrollWidgetCtor2  = 0x16EE71C;   // 双参构造(obj, rect)（预留）
+constexpr uint32_t  SCROLL_WIDGET_ALLOC    = 0x1E8;       // ScrollWidget operator new 大小
+// Widget 通用位置/尺寸字段（float，双架构同值，ARM64 验证于 sub_16EF39C）
+constexpr uintptr_t WIDGET_OFF_X = 68;                    // +68  x（sub_A4DA68 setPos / layout 读）
+constexpr uintptr_t WIDGET_OFF_Y = 72;                    // +72  y
+constexpr uintptr_t WIDGET_OFF_W = 76;                    // +76  width
+constexpr uintptr_t WIDGET_OFF_H = 80;                    // +80  height
+// ScrollWidget 滚动相关字段（相对对象头）
+constexpr uintptr_t SCROLL_MODE_Y = 300;                  // +300 垂直滚动 mode
+constexpr uintptr_t SCROLL_MODE_X = 304;                  // +304 水平滚动 mode
+constexpr uintptr_t SCROLL_FLAGS  = 308;                  // +308 滚动轴 flags（bit0=X,bit1=Y）
+constexpr uintptr_t SCROLL_CONTENT_W = 312;               // +312 内容宽
+constexpr uintptr_t SCROLL_CONTENT_H = 316;               // +316 内容高
+constexpr uintptr_t SCROLL_STATE    = 468;                // +468 需要滚动标志（bit0=X,bit1=Y）
+constexpr uintptr_t SCROLL_INSETS   = 320;                // +320 滚动内边距（int32x2 left,top）
+constexpr uintptr_t SCROLL_OFF_W    = 460;                // +460 水平滚动偏移（float）
+constexpr uintptr_t SCROLL_OFF_H    = 464;                // +464 垂直滚动偏移（float）
+constexpr uintptr_t SCROLL_VP_W     = 452;                // +452 可视区宽（float）
+constexpr uintptr_t SCROLL_VP_H     = 456;                // +456 可视区高（float）
 
 // UseHighViewAngle 配置字段：DisplayInfo 对象（即 g_DisplayInfo 解引用后的对象）+ 0xA16(2582)
 // 该字节位于 HasDisabledUsageSharing(+2579)/DownloadPermissionOnWWAN(+2580)/
@@ -107,6 +157,154 @@ constexpr uintptr_t DISPLAYINFO_SCREEN_WIDTH  = 244;       // 0xF4  screenWidth 
 constexpr uintptr_t DISPLAYINFO_SCREEN_HEIGHT = 248;       // 0xF8  screenHeight 字段偏移
 constexpr uintptr_t DISPLAYINFO_BOARD         = 2472;      // 0x9A8 board 指针在 DisplayInfo 对象内偏移
 constexpr uintptr_t DISPLAYINFO_SCREEN_OFFSET = 1820;      // 0x71C screenOffset（BoardLayout_ApplyZoom 用）
+
+// --- 语言管理器（v3.3 IDA 实证：CDN 清单收集 sub_AC8418 与本地加载
+//     sub_11F475C 共用链路 [G]+0x7C8 → LangMgr，[LangMgr+0x1E4] 为
+//     当前语言 FourCC（大写 locale 打包，如 "EN-US"=0x454E5553），
+//     经 sub_16A8A4C "%c%c-%c%c" 转字符串后拼 "LawnStrings-%s" 文件名；
+//     运行期无写入者，仅构造期初始化一次，直写后稳定生效）---
+constexpr uintptr_t DISPLAYINFO_LANGMGR       = 1992;      // 0x7C8 语言管理器指针（DisplayInfo 内）
+constexpr uintptr_t LANGMGR_LOCALE_ID         = 484;       // 0x1E4 次语言 FourCC 字段（LangMgr 内）
+constexpr uintptr_t LANGMGR_MAIN_LOCALE_ID    = 480;       // 0x1E0（v6.2：勿写！）。GetGroupForFile
+                                                            // （sub_16B2DEC）匹配为 (条目lang1==0 或
+                                                            // ==[+0x1E0]) && (条目lang2==0 或 ==[+0x1E4])，
+                                                            // 但 MuMu 实测游戏以 zh-cn 正常运行时该字段
+                                                            // 恒为 0x600(=1536，非 FourCC)——LawnStrings 条目
+                                                            // lang1==0，匹配只需 +0x1E4；且该字段被游戏他处
+                                                            // 读取，v6.1 写 FourCC 污染它 = 进游戏崩溃根因。
+                                                            // v6.2 起只读诊断，不写入。
+constexpr uint32_t  LANG_ID_EN_US             = 0x454E5553u; // "EN-US"
+constexpr uint32_t  LANG_ID_ZH_CN             = 0x5A48434Eu; // "ZH-CN"
+
+// --- 字体配置对象字段（v7.0 只读探针；对象指针 = OFF_FontContext 全局）---
+// sub_7C65BC(fontLoad) 实证：+32 = 字体名 wstring（构建文本上下文的输入），
+// +104 = 已构建上下文缓存（非 0 时 fontLoad 直接返回缓存，不重建）。
+constexpr uintptr_t FONTCONFIG_FONT_NAME      = 32;        // fontConfig+32：字体名 wstring
+constexpr uintptr_t FONTCONFIG_CACHED_CTX     = 104;       // fontConfig+104：缓存文本上下文
+
+// ---- 【废弃】资源 id 通道偏移 ----
+// 随 deprecated/resource_id_channel.cpp 一并归档，仅归档件引用；现役实现
+// 不再使用（改用 OFF_PACKAGE_FIND_RECORD 的 RSB 名查找，见 resource_file.cpp）。
+constexpr uintptr_t OFF_RESOURCE_DESC_INIT           = 0x10A9714;
+constexpr uintptr_t OFF_RESOURCE_HANDLE_INIT         = 0x153397C;
+constexpr uintptr_t OFF_RESOURCE_HANDLE_RELEASE      = 0x15339EC;
+constexpr uintptr_t OFF_GENERIC_RESFILE_DESC_VTABLE  = 0x24A2298;
+constexpr uintptr_t OFF_GENERIC_RESFILE_RESOLVE      = 0x65C42C;
+constexpr uintptr_t OFF_RESOURCE_MANAGER_GET         = 0x1545628;
+constexpr uintptr_t OFF_RESOURCE_HANDLE_RESOLVE      = 0x154E264;
+constexpr uintptr_t OFF_RESOURCE_TABLE_GET           = 0x154DA3C;
+constexpr uintptr_t OFF_RESOURCE_OBJECT_GET          = 0x1548698;
+constexpr uintptr_t OFF_GENERIC_RESFILE_TYPE          = 0x169BCF0;
+constexpr uintptr_t OFF_RESOURCE_APP_SINGLETON       = 0x26C5ED8;
+constexpr uintptr_t OFF_RESOURCE_BUFFER_INIT         = 0x1596A34;
+constexpr uintptr_t OFF_RESOURCE_BUFFER_DESTROY      = 0x1596A54;
+constexpr uintptr_t OFF_RESOURCE_OPEN                = 0x153EDD0;
+
+// --- PVZDB 热重载（v3.4 IDA 实证：CDN Apply 链路终点，运行期可调）---
+// sub_120AEFC(db, tableID, path) "PVZDB::LoadPackageForTableFromRTONFile"：
+//   路径先查内部归档失败后走 fopen("rb") 文件系统；对已加载表自动经
+//   sub_120C170 清理旧数据再装载 = 原生热替换语义。CDN Apply
+//   （sub_D58544）与离线持久化加载均走此入口。
+constexpr uintptr_t OFF_PVZDB_SINGLETON       = 0x26962F8; // qword_26962F8：PVZDB 单例指针全局
+constexpr uintptr_t OFF_DB_LOAD_RTON          = 0x120AEFC; // 加载器函数偏移
+// sub_13D0F30()：官方 Localized Strings 应用入口。读取 table 131 的键值对，
+// 逐项写入 qword_26C5ED8 的本地化容器，完成后卸载 table 131。
+constexpr uintptr_t OFF_APPLY_LOCALIZED_STRINGS = 0x13D0F30;
+// --- 设置页 Tab 对象（v7.4 标题刷新；createTab=sub_A4D79C，Tab::init=sub_A54230）---
+// Tab 0xF0 字节：+184 标题 wstring（+184 flag/size、+200 heap，构造时经
+// sub_14F324C 从容器解析一次后不再更新=标签栏标题滞留根因）；+216/+224
+// 图标 widget；+232 文本标签(0x2D8)。改写序列与 controller 标题同构。
+constexpr uintptr_t OFF_SETTINGS_TAB_VTABLE    = 0x24E44E8; // Tab 对象 vtable
+constexpr uintptr_t SETTINGS_TAB_TITLE         = 184;       // Tab+184：标题 wstring
+constexpr uintptr_t SETTINGS_TAB_TITLE_HEAP    = 200;       // Tab+200：标题堆指针
+// Tab+232 文本标签（0x2D8，sub_130A068 创建：标题键经 sub_14F324C 解析后
+// 经 vtable+752 SetText 写入，SetText 为拷贝语义）。可见标题文字 = 标签
+// 自己的副本，刷新标题必须同时更新标签。
+constexpr uintptr_t OFF_SETTINGS_TAB_LABEL_VTABLE = 0x25E06B0; // 标签 vtable
+constexpr uintptr_t SETTINGS_TAB_LABEL            = 232;       // Tab+232：标签指针
+constexpr uintptr_t SETTINGS_TAB_LABEL_SETTEXT_VT = 752;       // 标签 vt+752：SetText
+// --- v7.16：0x2D8 标签构造器捕获（主界面/弹窗等数据驱动文案的统一入口）---
+// sub_130A068(label,id,iface,textObj,style,font)：textObj 为键(方括号)时
+// 构造器内部 sub_14F324C 解析一次并经 vt+752 SetText 写入 label+360 文本
+// wstring（SetText 拷贝语义并同步 label+584 度量对象）。菜单 [MAINMENU_PLAY]
+// 即此路径（v7.15 盘点实证：调用点 +0x130a180 在构造器内）。
+constexpr uintptr_t OFF_SETTINGS_LABEL_CREATE   = 0x130A068; // 标签构造器
+constexpr uintptr_t SETTINGS_LABEL_TEXT         = 360;      // label+360 文本 wstring
+// --- 设置行初始化器（v7.7：全部设置行原位改写）---
+// sub_A54230(row, titleKeyString)：所有带标题的设置行（Tab 行
+// createTab/sub_A4D79C、Music/SoundFX 滑条行 sub_A4DBB0、checkbox 行
+// sub_A4DEAC）统一经它初始化 0xF0 行对象：标题键经 sub_14F324C 从容器
+// 解析一次,存 +184(flag/size)+200(heap)。hook 它即可捕获全部行对象
+// 与标题键,语言切换后原位改写 +184(返回显示/状态变化时按 +184 重绘)。
+
+constexpr uintptr_t OFF_SETTINGS_ROW_INIT       = 0xA54230;
+// --- v7.11：容器键写入（语言页标题键,官方 apply 逐键写入同款函数）---
+// sub_15407DC(owner, key窄string, value宽string)：向容器插入/更新一个键。
+// owner = qword_26C5ED8(与 OFF_PersistManager 同址)。语言切换后将
+
+
+// --- RSB 通道诊断（v6.2；【仅 Debug 探针】使用，Release 版不执行）---
+// sub_120AEFC 内部调 sub_153EDD0(qword_26C5ED8, name, buf, 1)：
+//   pakMgr = qword_26C5ED8（与 OFF_PersistManager 同一对象，双重身份：
+//   Persist 配置 + Pak 文件管理）；rsm = *(pakMgr+0x858)（ResStreamsManager）。
+//   前置开关：rsm 非空 且 *(rsm+24)!=0（sub_16AD8D0），否则整个 RSB 查找
+//   被跳过直接落磁盘。GetGroupForFile（sub_16B2DEC）两条查找路径：
+//   路径1 挂载表扫描（rsm+112 包数量，rsm+120 包数组，type==3 的包内
+//   文件名表查找，无语言匹配）；路径2 全局哈希树（rsm+48 根指针非空
+//   即 sub_17AFECC 可用，+48+8 条目计数，查找大小写不敏感，a4=1 时
+//   做 +0x1E0/+0x1E4 语言匹配）。
+constexpr uintptr_t OFF_PAK_MANAGER           = 0x26C5ED8; // qword_26C5ED8：Pak 管理器（=PersistManager 同址）
+constexpr uintptr_t PAKMGR_RES_STREAMS_MGR    = 0x858;     // pakMgr+0x858 → ResStreamsManager 指针
+constexpr uintptr_t RSM_RSB_SWITCH            = 24;        // rsm+24：RSB 通道开关（QWORD 指针，非 0 才走
+                                                            // RSB，sub_16AD8D0 判定；v6.3 修正为按指针读）
+constexpr uintptr_t RSM_MOUNT_COUNT           = 112;       // rsm+112：挂载包数量（路径 1）
+constexpr uintptr_t RSM_MOUNT_ARRAY           = 120;       // rsm+120：挂载包数组指针
+// sub_16B31EC：ResStreamsManager 按 RSB 名字取记录 (dataPtr,size)。
+//   uint32_t sub_16B31EC(rsm, groupIdx, name, &dataPtr, &dataSize)
+//   groupIdx=-1 时遍历全部 type3 挂载组按名字查（radix），命中后按
+//   "组 buffer 基址 + 组内文件偏移 + node.off" 算出 dataPtr，size=node.size。
+//   这是游戏读任意 rton 原始字节的原语（sub_153EDD0 内部即调用它）。
+constexpr uintptr_t OFF_PACKAGE_FIND_RECORD   = 0x16B31EC;
+constexpr uintptr_t RSM_GLOBAL_HASH_TREE      = 48;        // rsm+48：全局哈希树根指针（路径 2）
+constexpr uintptr_t HASH_TREE_ENTRY_COUNT     = 8;         // 树对象+8：条目计数
+// --- RSB 树实查诊断（v6.3；【仅 Debug 探针】使用，Release 版不执行）---
+// GetGroupForFile（sub_16B2DEC）/取数（sub_16B31EC）共用基数树查找
+// sub_17AFEDC(treeRoot, name)：树根【内嵌】于宿主结构（挂载组+32 /
+// rsm+48，传结构地址本身而非其内容），逐字符 toupper 大小写不敏感，
+// '/'(0x2F) 会被调用方换成 '\'(0x5C) 后再查。返回节点 = uint32[3]：
+//   node[0]=标志/组号（0x10000000 位=语言变体复合条目，低 28 位=
+//           RSB 主对象记录索引；-1=无效）
+//   node[1]=数据偏移  node[2]=数据大小
+// 挂载组结构（mountArr 数组，每组 200 字节）：
+//   +24 type（路径 1 只认 type==3）  +32 内嵌组内名字树
+// 语言变体复合条目（全局树命中且 node[0]&0x10000000）：
+//   rsb = *(rsm+32)（RSB 主对象）
+//   rec = rsb + *(u32)(rsb+56) + (u64)*(u32)(rsb+60) * (node[0]&0xFFFFFFF)
+//   子条目数 = *(u32)(rec+1152)；子条目 i（步长 16 字节）：
+//     +0=组号  +4=lang1（匹配 LangMgr+0x1E0，0=不限）
+//     +8=lang2（匹配 LangMgr+0x1E4，0=不限）
+constexpr uintptr_t OFF_RADIX_FIND            = 0x17AFEDC; // sub_17AFEDC 基数树查找（只读，无副作用）
+constexpr uintptr_t GROUP_MOUNT_TYPE          = 24;        // 挂载组+24：type
+constexpr uintptr_t GROUP_NAME_TREE           = 32;        // 挂载组+32：内嵌组内名字树
+constexpr uintptr_t GROUP_ENTRY_STRIDE        = 200;       // 挂载组数组步长（字节）
+constexpr uintptr_t RSM_RSB_MAIN              = 32;        // rsm+32：RSB 主对象指针
+constexpr uintptr_t RSB_MAIN_TABLE_OFF        = 56;        // rsb+56：记录表基址偏移（u32）
+constexpr uintptr_t RSB_MAIN_REC_SIZE         = 60;        // rsb+60：记录步长（u32）
+constexpr uintptr_t RSB_VARIANT_COUNT_OFF     = 1152;      // rec+1152：复合条目子条目数（u32）
+constexpr uintptr_t RSB_VARIANT_FIRST_OFF     = 128;       // rec+128：首个子条目
+constexpr uintptr_t RSB_VARIANT_STRIDE        = 16;        // 子条目步长（字节）
+constexpr uint32_t  RSB_VARIANT_FLAG          = 0x10000000u; // node[0] 语言变体复合条目标志位
+constexpr uintptr_t OFF_CDN_APPLY             = 0xD58544;  // CDN Apply（含广播+日志，热重载走此入口）
+constexpr uintptr_t OFF_DB_SAVE_RTON          = 0x120C2A8; // PVZDB::SavePackageForTableToFile（内存表→RTON 落盘）
+constexpr uintptr_t OFF_DELEGATE_MGR_PTR      = 0x263F070; // off_263F070 → Delegate 管理器指针槽
+constexpr uintptr_t DELEGATE_MGR_LOCK_DWORD   = 0x50;      // mgr+0x50 重入计数（v6.0 反汇编复核修正，
+                                                            // 旧值 0x250 为误记；d58694: LDR W8,[X20,#0x50]，
+                                                            // mgr 对象静态位于 0x26A0DD0，+0x50=dword_26A0E20）
+constexpr uintptr_t OFF_DELEGATE_UNLOCK       = 0x9AA030;  // sub_9AA030(mgr)：计数归零时的解锁调用
+// 表应用完成广播（照抄 sub_D58544 @0xd58670-0xd586dc）：
+//   mgr=[0x263F070槽]；Lock=vtable+0x18(mgr,&ret)→{begin,end}；
+//   步长0x30遍历，回调 elem+0x28 槽位，参数 X1=tableID；
+//   前后维护 mgr+0x50 重入计数，归零调 sub_9AA030(mgr)。
 constexpr uintptr_t OFF_A23A8C                 = 0xA23A8C; // sub_A23A8C 方向表（8 个 case 返回摄像机移动坐标，诊断用）
 constexpr uintptr_t OFF_C187C                  = 0x6C187C; // sub_6C187C MoveBoard action 工厂(xStart,xEnd,a3,a4,a5=4,dur) 诊断用
 constexpr uintptr_t OFF_AEF69C                 = 0xAEF69C; // sub_AEF69C 渲染坐标转换(Board,{x,y,w,h}) 乘法型 screenX=b281+scale*(worldXpx-b281+b17) 诊断用

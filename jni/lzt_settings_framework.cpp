@@ -1,5 +1,5 @@
 /*
- * LawnZoomTab - PvZ2 Android 视角菜单项 + 高低视角切换 + 黑边修复 hook
+ * settingsframework - PvZ2 Android 设置扩展框架 + 视角模块（相机 hook 主文件）
  *
  * 支持 ARM64 和 ARM32 双架构，两架构功能完全对等。
  * ARM32 目标函数为 ARM 模式（偶数地址），由 BLX 完成指令集切换。
@@ -47,13 +47,11 @@
  *   注：dp 计算和黑边判定代码保留但不再参与任何逻辑运算
  *   （blackEdge 仍计算用于日志诊断，但不影响判定条件）
  *
- * === View Angle 设置页面 ===
- *   新增独立设置 Tab（ID=30），位置紧跟 Build Version 之后
- *   页面包含：
- *     - Prompt 文本：根据状态显示 VIEW_ANGLE_HIGH_PROMPT 或 VIEW_ANGLE_LOW_PROMPT
- *     - 两个互斥 Checkbox：VIEW_HIGH (ID=32) 和 VIEW_LOW (ID=31)
- *   状态字段：UseHighViewAngle（独立用户数据，不复用 DataSharing）
- *   状态持久化到游戏配置，启动时读取并同步 BoardZoom2 Hook 挂载状态
+ * === View Angle 设置页面（已迁移） ===
+ *   Settings UI 已重构为通用框架 lzt_settings（settings/ 目录），
+ *   "视角"Tab 以普通模块身份接入（view_angle_module.cpp）。
+ *   本文件通过 view_angle_state_high() 消费视角状态做对齐阈值判定，
+ *   通过 lzt_view_hooks_set_enabled 提供高视角缩放 hook 的挂载机制。
  *
  * === 架构差异说明 ===
  *   ARM64: 使用 And64InlineHook 库，patch 有两种模式（B 近跳 / LDR+BR 远跳）
@@ -90,7 +88,13 @@
 #include <android/asset_manager.h>
 #include <dlfcn.h>
 #include <link.h>     // dl_iterate_phdr（API 21+）
-#include "lawn_zoom_tab_config.h"
+#include "lzt_settings_framework_config.h"
+#include "lzt_core.h"
+#include "lzt_hooks.h"
+#include "settings/settings_framework.h"
+#include "view_angle_module.h"
+#include "language_module.h"
+#include "screen_bindings.h"
 
 #ifdef __aarch64__
 #include "And64InlineHook.hpp"
@@ -100,87 +104,35 @@
 // 本地文件日志
 //
 // 日志同时输出到两个目标：
-//   1. Android logcat（tag: LawnZoomTab）— 便于实时调试
-//   2. 本地文件 /sdcard/Android/data/<pkg>/files/LawnZoomTab.log — 持久化保存
+//   1. Android logcat（tag: settingsframework）— 便于实时调试
+//   2. 本地文件 /sdcard/Android/data/<pkg>/files/settingsframework.log — 持久化保存
 //
 // 包名通过读取 /proc/self/cmdline 动态获取，适配不同包名（如 com.ea.game.pvz2_cln）
 // ============================================================
 
-static FILE *g_logFile = nullptr;
-static std::atomic<uintptr_t> g_base{0};
-static volatile sig_atomic_t g_crash_stage = 0;
+// ============================================================
+// 公共基础层（日志/基址/崩溃诊断）— 实现已迁移至 lzt_core.h/cpp
+//
+// 以下兼容包装保持历史符号名不变，主文件既有调用点零改动：
+//   g_base / g_crash_stage 绑定到 lzt_core 的进程级单例；
+//   log_write/log_init/current_base 转发到 lzt_core 同义接口。
+// ============================================================
+static std::atomic<uintptr_t>& g_base = lzt_core::base_ref();
+static volatile sig_atomic_t& g_crash_stage = lzt_core::stage_ref();
 
 static uintptr_t current_base() {
-    return g_base.load(std::memory_order_acquire);
-}
-
-static void crash_signal_handler(int signal_number, siginfo_t *info, void *) {
-    char buffer[256];
-    int length = snprintf(buffer, sizeof(buffer),
-                          "NATIVE_CRASH signal=%d fault=%p stage=%d base=0x%lx\n",
-                          signal_number, info ? info->si_addr : nullptr,
-                          g_crash_stage, static_cast<unsigned long>(current_base()));
-    if (g_logFile && length > 0) {
-        fwrite(buffer, 1, static_cast<size_t>(length), g_logFile);
-        fflush(g_logFile);
-    }
-    __android_log_write(ANDROID_LOG_FATAL, "LawnZoomTab", buffer);
-    signal(signal_number, SIG_DFL);
-    raise(signal_number);
-}
-
-static void install_crash_diagnostics() {
-    struct sigaction action = {};
-    sigemptyset(&action.sa_mask);
-    action.sa_sigaction = crash_signal_handler;
-    action.sa_flags = SA_SIGINFO;
-    sigaction(SIGSEGV, &action, nullptr);
-    sigaction(SIGABRT, &action, nullptr);
-    sigaction(SIGBUS, &action, nullptr);
-    sigaction(SIGILL, &action, nullptr);
-    sigaction(SIGFPE, &action, nullptr);
+    return lzt_core::base();
 }
 
 static void log_init() {
-    // 读取 /proc/self/cmdline 获取当前进程包名（以 \0 分隔）
-    std::ifstream cmdline("/proc/self/cmdline");
-    std::string pkg;
-    std::getline(cmdline, pkg, '\0');
-    if (pkg.empty()) pkg = "unknown";
-
-    std::string logPath = "/sdcard/Android/data/" + pkg + "/files/LawnZoomTab.log";
-    std::string dir = "/sdcard/Android/data/" + pkg + "/files";
-    mkdir(dir.c_str(), 0777);   // 确保目录存在
-
-    g_logFile = fopen(logPath.c_str(), "w");   // "w" 模式每次启动覆盖旧日志
-    if (g_logFile) {
-        fprintf(g_logFile, "=== LawnZoomTab Log ===\n");
-        fprintf(g_logFile, "package: %s\n", pkg.c_str());
-        fprintf(g_logFile, "log path: %s\n", logPath.c_str());
-        fprintf(g_logFile, "arch: %s\n",
-#           ifdef __aarch64__
-                "arm64-v8a"
-#           elif defined(__arm__)
-                "armeabi-v7a"
-#           else
-                "unknown"
-#           endif
-        );
-        fflush(g_logFile);
-    }
+    lzt_core::log_init();
 }
 
 static void log_write(const char *fmt, ...) {
-    char buf[512];
-    va_list va;
-    va_start(va, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, va);
-    va_end(va);
-    __android_log_print(ANDROID_LOG_INFO, "LawnZoomTab", "%s", buf);
-    if (g_logFile) {
-        fprintf(g_logFile, "%s\n", buf);
-        fflush(g_logFile);   // 立即刷新，防止崩溃丢失日志
-    }
+    va_list ap;
+    va_start(ap, fmt);
+    lzt_core::log_write_v(fmt, ap);
+    va_end(ap);
 }
 
 // ============================================================
@@ -550,24 +502,7 @@ static constexpr float WATCHDOG_SCALE_MIN = 0.1f;
 static constexpr float WATCHDOG_SCALE_MAX = 10.0f;
 
 static bool is_memory_range_accessible(uintptr_t address, size_t size, bool writable) {
-    if (address == 0 || size == 0 || address > UINTPTR_MAX - size) return false;
-
-    uintptr_t end = address + size;
-    std::ifstream maps("/proc/self/maps");
-    std::string line;
-    while (std::getline(maps, line)) {
-        unsigned long start = 0;
-        unsigned long mapped_end = 0;
-        char perms[5] = {0};
-        if (sscanf(line.c_str(), "%lx-%lx %4s", &start, &mapped_end, perms) != 3) {
-            continue;
-        }
-        if (address >= (uintptr_t)start && end <= (uintptr_t)mapped_end &&
-            perms[0] == 'r' && (!writable || perms[1] == 'w')) {
-            return true;
-        }
-    }
-    return false;
+    return lzt_core::memory_range_accessible(address, size, writable);   // 实现已迁至 lzt_core
 }
 
 static void start_board_watchdog(uintptr_t board) {
@@ -642,7 +577,7 @@ static void start_board_watchdog(uintptr_t board) {
                                b284 != last_b284 || b285 != last_b285 ||
                                b286 != last_b286);
                 if (changed || field_log_count == 0) {
-                    LZT_DEBUG_LOG("watchdog: fields#%d b270=%d b283=%d b284=%d "
+                    LZT_DBG_LOG("watchdog: fields#%d b270=%d b283=%d b284=%d "
                               "b285=%d b286=%d%s",
                               sample_count, b270, b283, b284, b285, b286,
                               changed ? " (CHANGED)" : " (init)");
@@ -693,7 +628,7 @@ static void start_board_watchdog(uintptr_t board) {
             // 日志：只在值变化时输出（不再周期性刷屏）
             // 用 %g 显示浮点精确值：极小非零值（如非规格化数）不会显示为 0.0000
             if (v != last_logged) {
-                LZT_DEBUG_LOG("watchdog: sample#%d scale=%g %s",
+                LZT_DBG_LOG("watchdog: sample#%d scale=%g %s",
                           sample_count, v,
                           (v == 1.0f) ? "(ok)" :
                           (v == 0.0f) ? "(zero?)" :
@@ -788,1013 +723,26 @@ static CameraUpdate_t oCameraUpdate = nullptr;
 #endif
 
 // ============================================================
-// Settings 视角切换 UI（v32 起双架构共享框架）
-//
-// 函数地址经 offsets.h 按架构选择；游戏内部 std::string / std::wstring
-// 对象布局按指针宽度自适应（ARM64 24 字节 / ARM32 12 字节）。
-// 共享：类型、静态状态、键常量、hkSettingsCreateTab/Dispatch/CreatePage、
-//       get/set_view_angle_state（GameString 自适应）。
-// 架构专属：open_view_angle_page（ARM64 手动 vtable 挂载）/
-//           open_view_angle_page32（ARM32 原版函数挂载）。
-// ============================================================
-// 原版 dispatch（sub_A501E0/sub_6D5BE8）与页面函数（sub_A4EA34/sub_6D4420）均返回 int：
-// dispatch 返回 layout(sub_6D61EC) 结果，页面函数恒返 0（canary 校验差值）。hook 透传。
-typedef int (*SettingsDispatch_t)(uintptr_t page, uint32_t tabId);
-typedef void (*SettingsStringCreate_t)(uintptr_t out, uintptr_t text, uint32_t length);
-typedef uintptr_t (*SettingsIconLoad_t)(uintptr_t resource);
-typedef uintptr_t (*SettingsCreateTab_t)(uintptr_t page, uint32_t id, uintptr_t title,
-                                         uintptr_t iconNormal, uintptr_t iconSelected);
-typedef long (*SettingsAttachTab_t)(uintptr_t container, uintptr_t tab, uint8_t centered,
-                                    float uiScale);
-typedef uintptr_t (*SettingsLayout_t)(uintptr_t page);
-typedef void (*SettingsContentCreate_t)(uintptr_t content);
-typedef float (*SettingsScaleFloat_t)(uintptr_t context, float value);
-typedef int (*SettingsCreatePage_t)(uintptr_t page);
-
-static SettingsCreateTab_t oSettingsCreateTab = nullptr;
-static SettingsDispatch_t oSettingsDispatch = nullptr;
-static SettingsCreatePage_t oSettingsCreatePage = nullptr;   // DataSharing 页面原函数
-static SettingsStringCreate_t pSettingsStringCreate = nullptr;
-static SettingsStringCreate_t pSettingsTitleStringCreate = nullptr;
-static SettingsIconLoad_t pSettingsIconLoad = nullptr;
-static SettingsAttachTab_t pSettingsAttachTab = nullptr;
-static SettingsLayout_t pSettingsLayout = nullptr;
-static SettingsContentCreate_t pSettingsContentCreate = nullptr;
-static SettingsScaleFloat_t pSettingsScaleFloat = nullptr;
-static uintptr_t g_settings_hook_base = 0;
-static bool g_settings_create_hooked = false;
-static bool g_settings_dispatch_hooked = false;
-static bool g_settings_page_hooked = false;
-static bool g_inserting_view_angle_tab = false;
-static bool g_isViewAnglePage = false;   // 当前是否处于 View Angle 页面（区分 DataSharing 重建）
-static const wchar_t kViewAngleTitleKey[] = L"[VIEW_ANGLE_TITLE]";         // 18 字符
-static const wchar_t kViewAngleHighPrompt[] = L"[VIEW_HIGH_PROMPT]"; // 18 字符
-static const wchar_t kViewAngleLowPrompt[] = L"[VIEW_LOW_PROMPT]";   // 17 字符
-static const wchar_t kViewHighLabel[] = L"[VIEW_HIGH]";                    // 11 字符
-static const wchar_t kViewLowLabel[] = L"[VIEW_LOW]";                      // 10 字符
-#ifdef __aarch64__
-static void open_view_angle_page(uintptr_t page);
-#endif
-#ifdef __arm__
-static void open_view_angle_page32(uintptr_t page);
-#endif
-
-// 游戏内部字符串对象（libc++ std::string / std::wstring 同构）：
-//   ARM64: 24 字节 {flag(8B), size(8B), heap(8B)}
-//   ARM32: 12 字节 {flag(4B), size(4B), heap(4B)}
-//   flag bit0 = 长串标志（小端），长串时 heap 为堆指针；
-//   窄串 size=字节数，宽串 size=字符数。
-struct GameString {
-#ifdef __aarch64__
-    uint64_t flag;
-    uint64_t size;
-    uint64_t heap;
-#else
-    uint32_t flag;
-    uint32_t size;
-    uint32_t heap;
-#endif
-};
-using LocalizedString = GameString;
-
-// 释放字符串对象（长串时释放堆缓冲；短串数据内联无需释放）
-static void free_game_string(GameString& s) {
-    if (s.flag & 1) {
-        operator delete(reinterpret_cast<void*>((uintptr_t)s.heap));
-    }
-}
-
-// sub_A4DEAC：创建 checkbox
-// 参数：page（页面对象，内部读 page+192/page+208 作为回调字段）、
-//       id、labelString（标签键字符串对象）、initialState、width
-typedef uintptr_t (*CheckboxCreate_t)(uintptr_t page, uint32_t id, uintptr_t labelString,
-                                       char initialState, int width);
-typedef void (*SettingsAddWidget_t)(uintptr_t content, uintptr_t widget, uint8_t centered, float uiScale);
-static CheckboxCreate_t pCheckboxCreate = nullptr;
-static SettingsAddWidget_t pSettingsAddWidget = nullptr;
-
-// 本地化字符串对象布局见 GameString（ARM64 24 字节 / ARM32 12 字节）
-
-#ifdef __aarch64__
-// sub_14F3354：本地化键字符串（ARM64）
-// 输入 X0 = wchar_t* 键（带方括号，如 "[VIEW_ANGLE_TITLE]"）
-// 输出 X8 = LocalizedString（24 字节，通过 sret 返回）
-// 约定：24 字节结构体 > 16 字节，AAPCS 使用 X8 作为 sret 返回指针
-typedef LocalizedString (*LocalizeKey_t)(const wchar_t* key);
-
-// 设置页面顶部标题（自动本地化键字符串）
-// 复用原版本地化函数 sub_14F3354：内部自动完成方括号识别、本地化表查找、
-// 缺失时加 missing 前缀。这里只需把返回的 24 字节字符串对象写入 controller
-// 标题字段（controller+184，与 sub_A4EA34/sub_A514DC 原版页面函数一致）。
-static void set_controller_title(uintptr_t controller, const wchar_t* key) {
-    LocalizeKey_t localizeKey = reinterpret_cast<LocalizeKey_t>(g_base + OFF_LocalizeKey);
-    LocalizedString title = localizeKey(key);
-
-    using TitleRelease_t = void (*)(uintptr_t, uint32_t);
-    auto releaseTitle = reinterpret_cast<TitleRelease_t>(g_base + OFF_ReleaseTitle);
-    auto controllerTitle = reinterpret_cast<uint8_t*>(controller + SETTINGS_CONTROLLER_TITLE);
-    releaseTitle(reinterpret_cast<uintptr_t>(controllerTitle), 0);
-    *reinterpret_cast<uintptr_t*>(controller + SETTINGS_CONTROLLER_TITLE_HEAP) = title.heap;  // 堆指针
-    memcpy(controllerTitle, &title, 16);                          // flag + size
-}
-#endif // __aarch64__（set_controller_title 写 ARM64 专属偏移；ARM32 走原版 sub_6D7AD0）
-
-// --- Prompt 文本创建链路（复刻 DataSharing 页面函数）---
-// 字体/测量/容器部分双架构签名一致；文本标签参数顺序架构不同，各自定义。
-typedef uintptr_t (*FontLoad_t)(uintptr_t fontConfig);
-typedef uintptr_t (*TextMeasure_t)(uintptr_t ctx, uintptr_t strObj, uint32_t* outW, uint32_t* outH, float width);
-typedef uintptr_t (*TextContainerCreate_t)(uintptr_t container);
-typedef void (*ContainerSetPos_t)(uintptr_t container, uint32_t* pos);
-typedef void (*TextContainerAdd_t)(uintptr_t container, uintptr_t label);
-
-#ifdef __aarch64__
-typedef uintptr_t (*TextLabelCreate_t)(uintptr_t ctx, uintptr_t strObj, int a3, int a4,
-                                        uintptr_t style, float fontsize, float x,
-                                        float width, float height);
-
-// 创建 prompt 文本并挂到 content（prompt 位于 checkbox 上方）
-static void add_view_angle_prompt(uintptr_t content, uintptr_t uiContext,
-                                  float scale, int checkboxWidth, float uiScale,
-                                  bool useHighViewAngle) {
-    const wchar_t* promptKey = useHighViewAngle ? kViewAngleHighPrompt : kViewAngleLowPrompt;
-
-    // 1. 本地化 prompt 键
-    LocalizeKey_t localizeKey = reinterpret_cast<LocalizeKey_t>(g_base + OFF_LocalizeKey);
-    LocalizedString promptStr = localizeKey(promptKey);
-
-    // 2. 加载字体/文本上下文
-    uintptr_t fontConfig = *reinterpret_cast<uintptr_t*>(g_base + OFF_FontContext);
-    auto fontLoad = reinterpret_cast<FontLoad_t>(g_base + OFF_FontLoad);
-    uintptr_t textCtx = fontLoad(fontConfig);
-
-    // 3. 测量文本尺寸（prompt 宽度 = checkbox 宽度 - 20*scale）
-    int promptWidth = checkboxWidth - (int)(scale * 20.0f);
-    auto textMeasure = reinterpret_cast<TextMeasure_t>(g_base + OFF_TextMeasure);
-    uint32_t measureW = 0, measureH = 0;
-    textMeasure(textCtx, reinterpret_cast<uintptr_t>(&promptStr),
-                &measureW, &measureH, (float)promptWidth);
-    int promptHeight = (int)measureH + (int)(scale * 10.0f);
-
-    // 4. 创建文本容器（0xD0 字节）
-    auto containerCreate = reinterpret_cast<TextContainerCreate_t>(g_base + OFF_TextContainerCreate);
-    uintptr_t container = reinterpret_cast<uintptr_t>(operator new(0xD0u));
-    containerCreate(container);
-
-    // 5. 设置容器位置和尺寸 vtable[424/8](container, [x, y, w, h])
-    //    注意：sub_1526C9C 实际读取 a2[0..3] 共 4 个 int（x/y/w/h），
-    //    其中 w/h 会被写入 container+76/+80，供 sub_A4DA68 自动堆叠时读取高度。
-    uintptr_t containerVtable = *reinterpret_cast<uintptr_t*>(container);
-    uintptr_t setPosFunc = *reinterpret_cast<uintptr_t*>(containerVtable + 424);
-    uint32_t promptRect[4] = {
-        (uint32_t)(int)(scale * 4.0f),   // x
-        (uint32_t)(int)(scale * 2.0f),   // y
-        (uint32_t)promptWidth,           // width
-        (uint32_t)promptHeight           // height
-    };
-    reinterpret_cast<ContainerSetPos_t>(setPosFunc)(container, promptRect);
-
-    // 6. 创建文本标签
-    uintptr_t textCtx2 = fontLoad(fontConfig);
-    int fontSize = (int)(scale * 8.0f);
-    alignas(16) uint8_t style[16];
-    memcpy(style, reinterpret_cast<void*>(g_base + OFF_PromptStyle), 16);
-    auto labelCreate = reinterpret_cast<TextLabelCreate_t>(g_base + OFF_TextLabelCreate);
-    uintptr_t label = labelCreate(textCtx2, reinterpret_cast<uintptr_t>(&promptStr),
-                                  0, 0, reinterpret_cast<uintptr_t>(style),
-                                  (float)fontSize, 0.0f, (float)promptWidth, (float)promptHeight);
-
-    // 7. 标签加入容器
-    auto containerAdd = reinterpret_cast<TextContainerAdd_t>(g_base + OFF_TextContainerAdd);
-    containerAdd(container, label);
-
-    // 8. 容器加入 content
-    pSettingsAddWidget(content, container, 0, uiScale);
-
-    // 9. 释放本地化字符串
-    free_game_string(promptStr);
-}
-#endif // __aarch64__
-
-// ============================================================
-// View Angle 状态管理 — 写入游戏用户配置对象 + 原生持久化（双架构共享）
-//
-// 参考 iOS 实现与 Android DataSharing（HasDisabledUsageSharing）的读写模式：
-//   - 配置字段：DisplayInfo 对象 + CONFIG_USE_HIGH_VIEW_ANGLE（空闲 padding 字节）
-//   - 读取：ARM64 sub_153E560 / ARM32 sub_113973C（config, key_string, out）
-//   - 保存：ARM64 sub_153E084 / ARM32 sub_11391A4（manager, key_string, value）
-//   - 配置对象：*(g_base + OFF_G_DisplayInfo)
-//   - 持久化管理器：*(g_base + OFF_PersistManager)
-//   - key：窄字节 std::string "UseHighViewAngle"（布局见 GameString）
+// Settings UI 已迁移至 settings/ 框架（lzt_settings）与
+// view_angle_module.cpp（业务）。本文件仅保留相机/对齐 hook。
 // ============================================================
 
-// 持久化读写 bool。返回值用 long：ARM64=8 字节单寄存器 X0，ARM32=4 字节 R0，
-// 与游戏原函数返回约定一致（bool 命中标志仅占低位单寄存器）。
-typedef long (*PersistSaveBool_t)(uintptr_t manager, uintptr_t keyString, char value);
-typedef long (*PersistReadBool_t)(uintptr_t config, uintptr_t keyString, uintptr_t outPtr);
+// （GameString、prompt 文本链、本地化辅助已随 Settings UI 迁移至
+//   settings/settings_widgets.cpp）
 
-// 构造游戏内部窄字节 std::string（key 为 ASCII，长度 >15 走堆分配）
-static void build_key_string(GameString& s, const char* key) {
-    size_t len = strlen(key);
-    char* buf = static_cast<char*>(operator new(0x20u));  // 32 字节堆缓冲
-    s.flag = 0x20 | 1;   // capacity 32 | 堆标志 = 0x21
-    s.size = static_cast<decltype(s.size)>(len);
-    s.heap = static_cast<decltype(s.heap)>((uintptr_t)buf);
-    strcpy(buf, key);
-}
+// ============================================================
 
-// 视角状态缓存（多线程读写：UI 线程写、游戏逻辑线程/重试线程读）
-// 用 atomic 保证跨线程可见性与单次读写原子性
-static std::atomic<bool> g_useHighViewAngle_cache{true};   // 缓存值，默认高视角
-static std::atomic<bool> g_view_angle_state_loaded{false}; // 是否已从配置加载
-static void sync_view_hooks();                     // 前置声明：根据视角状态挂载/卸载高视角 hook
-static std::atomic<bool> g_view_hooks_enabled{false}; // BoardZoom2 hook 跨主线程/监控线程状态
+// （Checkbox 创建、本地化、prompt 文本链 typedef 与实现已迁移至
+//   settings/settings_widgets.cpp）
 
-// 读取 UseHighViewAngle 状态
-// 首次调用从偏好后端读取 "UseHighViewAngle" 到配置字段并缓存；
-// 未命中（首次运行）默认高视角，与 iOS 一致。
-static bool get_view_angle_state() {
-    if (!g_view_angle_state_loaded.load(std::memory_order_acquire)) {
-        uintptr_t cfg = *(uintptr_t*)(g_base + OFF_G_DisplayInfo);
-        if (cfg) {
-            GameString key;
-            build_key_string(key, "UseHighViewAngle");
-            auto readBool = reinterpret_cast<PersistReadBool_t>(g_base + OFF_PersistReadBool);
-            long found = readBool(cfg, reinterpret_cast<uintptr_t>(&key),
-                                  cfg + CONFIG_USE_HIGH_VIEW_ANGLE);
-            free_game_string(key);
-            bool value = true;  // 默认高视角
-            if (found) {
-                value = (*(uint8_t*)(cfg + CONFIG_USE_HIGH_VIEW_ANGLE) != 0);
-            }
-            g_useHighViewAngle_cache.store(value, std::memory_order_release);
-            g_view_angle_state_loaded.store(true, std::memory_order_release);
-            log_write("View Angle get_state: loaded from config = %d", value);
-        }
-        // 配置对象未就绪时返回默认高视角，且不锁定缓存，等配置就绪后再读
-    }
-    return g_useHighViewAngle_cache.load(std::memory_order_acquire);
-}
+// ============================================================
 
-// 保存 UseHighViewAngle 状态（变化时写入配置字段并持久化）
-static void set_view_angle_state(bool useHigh) {
-    uintptr_t cfg = *(uintptr_t*)(g_base + OFF_G_DisplayInfo);
-    if (!cfg) {
-        log_write("View Angle set_state: config object null");
-        return;
-    }
-    if (get_view_angle_state() == useHigh) {
-        log_write("View Angle set_state: no change (current=%d)", useHigh);
-        return;
-    }
-    // 写入配置字段
-    *(uint8_t*)(cfg + CONFIG_USE_HIGH_VIEW_ANGLE) = useHigh ? 1 : 0;
-    g_useHighViewAngle_cache.store(useHigh, std::memory_order_release);
-    // 持久化保存
-    uintptr_t manager = *(uintptr_t*)(g_base + OFF_PersistManager);
-    if (manager) {
-        GameString key;
-        build_key_string(key, "UseHighViewAngle");
-        auto saveBool = reinterpret_cast<PersistSaveBool_t>(g_base + OFF_PersistSave);
-        saveBool(manager, reinterpret_cast<uintptr_t>(&key), useHigh ? 1 : 0);
-        free_game_string(key);
-    }
-    // 同步高视角 hook（高视角挂载 / 低视角卸载）
-    sync_view_hooks();
-    log_write("View Angle set_state: saved to config = %d", useHigh);
-}
+// BoardZoom2 hook 跨主线程/监控线程状态（相机域，保留）
+static std::atomic<bool> g_view_hooks_enabled{false};
 
 // hook 函数地址（用于 patch 重装时引用）
 static void *g_hookBoardZoom2 = nullptr;
 static void *g_hookBoardZoom  = nullptr;
-
-// 按架构分发到 open_view_angle_page（ARM64）/ open_view_angle_page32（ARM32）
-static void open_view_angle_page_arch(uintptr_t page) {
-#ifdef __aarch64__
-    open_view_angle_page(page);
-#else
-    open_view_angle_page32(page);
-#endif
-}
-
-#ifdef __arm__
-// v43（B4）：校验 SettingsDialog::page+160 指向原版 Tab 容器。
-// 静态生命周期复核结论：旧日志中“第二次打开时 container 地址等于上一次的
-// checkbox 地址”是 allocator 对已释放堆块的正常地址复用，不能据此判定 UAF：
-//   - SettingsDialog 构造 sub_6D1894 @0x6D1C90 先 page+160=0；
-//   - 随后 new(0xA8)+sub_6D9608 构造新容器，@0x6D1CAC 写回 page+160；
-//   - sub_6D9608 @0x6D9644 将首字段写为 base+0x1D46128；
-//   - 析构 sub_6D3B68 通过 sub_12BA52C(...,1,1) 释放子树。
-// 因此不应擅自清空/重建容器（会破坏原版所有 Tab）。这里只做类型与内存校验；
-// 真遇到异常/悬垂指针则安全跳过自定义 Tab，原版锚点继续创建。
-static bool validate_settings_tab_container32(uintptr_t container) {
-    if (!container ||
-        !is_memory_range_accessible(container, sizeof(uintptr_t), false)) {
-        return false;
-    }
-    uintptr_t actualVtable = *reinterpret_cast<uintptr_t*>(container);
-    uintptr_t expectedVtable = g_base + OFF_SettingsTabContainerVtable;
-    if (actualVtable != expectedVtable) {
-        log_write("Settings insertion32 skip: invalid page+160 container=%p "
-                  "vtable=%p expected=%p (possible lifecycle corruption)",
-                  (void*)container, (void*)actualVtable, (void*)expectedVtable);
-        return false;
-    }
-    return true;
-}
-#endif
-
-// Hook createTab（ARM64 sub_A4D79C / ARM32 sub_6D3068），在原版创建
-// id=7 的 Tab 前原位注册 View Angle。这样新 Tab 和之后的原版 Tab
-// 都会按原有生命周期完成布局。
-static uintptr_t hkSettingsCreateTab(uintptr_t page, uint32_t id, uintptr_t title,
-                                     uintptr_t iconNormal, uintptr_t iconSelected) {
-    if (!oSettingsCreateTab)
-        return 0;
-
-    if (id != 7 || g_inserting_view_angle_tab)
-        return oSettingsCreateTab(page, id, title, iconNormal, iconSelected);
-
-    if (!pSettingsStringCreate || !pSettingsIconLoad || !pSettingsAttachTab) {
-        log_write("Settings insertion skip: helpers unavailable string=%d icon=%d attach=%d",
-                  pSettingsStringCreate != nullptr, pSettingsIconLoad != nullptr,
-                  pSettingsAttachTab != nullptr);
-        return oSettingsCreateTab(page, id, title, iconNormal, iconSelected);
-    }
-
-    uintptr_t container = *reinterpret_cast<uintptr_t*>(page + SETTINGS_PAGE_CONTAINER);
-    if (container == 0) {
-        log_write("Settings insertion skip: container null before anchor tab");
-        return oSettingsCreateTab(page, id, title, iconNormal, iconSelected);
-    }
-#ifdef __arm__
-    if (!validate_settings_tab_container32(container)) {
-        return oSettingsCreateTab(page, id, title, iconNormal, iconSelected);
-    }
-#endif
-
-    log_write("Settings insertion: before anchor page=%p container=%p", (void*)page,
-              (void*)container);
-    GameString titleObject = {};
-    uintptr_t normalIconResource = g_base + OFF_SettingsBuildVersionIconNormal;
-    uintptr_t selectedIconResource = g_base + OFF_SettingsBuildVersionIconSelected;
-    pSettingsStringCreate(reinterpret_cast<uintptr_t>(&titleObject),
-                          reinterpret_cast<uintptr_t>(kViewAngleTitleKey), 0x12);
-    uintptr_t normalIcon = pSettingsIconLoad(normalIconResource);
-    uintptr_t selectedIcon = pSettingsIconLoad(selectedIconResource);
-    if (normalIcon == 0 || selectedIcon == 0) {
-        log_write("Settings insertion skip: icon load failed normal=%p selected=%p",
-                  (void*)normalIcon, (void*)selectedIcon);
-        free_game_string(titleObject);
-        return oSettingsCreateTab(page, id, title, iconNormal, iconSelected);
-    }
-    g_inserting_view_angle_tab = true;
-    uintptr_t tab = oSettingsCreateTab(page, SETTINGS_VIEW_ANGLE_ID,
-                                       reinterpret_cast<uintptr_t>(&titleObject), normalIcon, selectedIcon);
-    g_inserting_view_angle_tab = false;
-    free_game_string(titleObject);   // createTab 内部已拷贝，释放构造串（与原版注册序列一致）
-    if (tab == 0) {
-        log_write("Settings insertion skip: View Angle creation failed");
-        return oSettingsCreateTab(page, id, title, iconNormal, iconSelected);
-    }
-
-    uintptr_t uiContext = *reinterpret_cast<uintptr_t*>(g_base + OFF_SettingsUIScaleContext);
-    if (uiContext == 0) {
-        log_write("Settings insertion skip: UI scale context null");
-        return oSettingsCreateTab(page, id, title, iconNormal, iconSelected);
-    }
-    using SettingsUIScale_t = int (*)(uintptr_t, int);
-    auto getUIScale = reinterpret_cast<SettingsUIScale_t>(g_base + OFF_SettingsUIScale);
-    float uiScale = static_cast<float>(getUIScale(uiContext, 0));
-    pSettingsAttachTab(container, tab, 0, uiScale);
-    log_write("Settings insertion: View Angle attached tab=%p, original anchor resumed",
-              (void*)tab);
-    return oSettingsCreateTab(page, id, title, iconNormal, iconSelected);
-}
-
-static int hkSettingsDispatch(uintptr_t page, uint32_t tabId) {
-    if (tabId == SETTINGS_VIEW_ANGLE_ID) {
-        // 进入 View Angle Tab：同步创建页面（Tab 点击不涉及正在被访问的 checkbox，安全）
-        g_isViewAnglePage = true;
-        log_write("View Angle shell dispatch entered page=%p", (void*)page);
-        open_view_angle_page_arch(page);
-        // v38：恢复 dispatch 层公共收尾 sub_6D61EC(page)。全量解码 sub_6D5BE8 证实
-        // 所有 vanilla tab case（2/3/12/15/25…）都在尾部 tail-call sub_6D61EC(page)
-        // （@0x6D60CC，见 case 3: BL sub_6D63E4 → loc_6D60B0 → B sub_6D61EC）。
-        // v37 只证明【页面函数内部】无此调用（sub_6D4420 尾部直接 return）就把它删除，
-        // 但它属于 dispatch 层而非页面函数——拦截分支 return 0 连它一起跳过，页面
-        // 构建+mount 后无任何刷新 → 点击 Tab 无反应（v37 症状）。ARM64 版在构建尾部
-        // 恒保留等价调用 sub_A5084C（ARM64 正常的原因）。dirty 重建路径
-        // （sub_6D41C4 @0x6D429C）后面无此调用，故只在 dispatch 分支补。
-        if (pSettingsLayout) {
-            log_write("View Angle dispatch tail layout page=%p guard=%d",
-                      (void*)page,
-                      *reinterpret_cast<int*>(page + SETTINGS_DISPATCH_GUARD));
-            pSettingsLayout(page);
-        }
-        return 0;   // 原版非 layout 分支（如 checkbox 类 case 22/23）同样返回 0
-    }
-
-    // 处理 Checkbox 点击事件（ID 32=VIEW_LOW, ID 31=VIEW_HIGH）
-    // 关键：不要在事件处理中同步重建（会释放正在被框架访问的 checkbox，导致 use-after-free 崩溃）。
-    // 正确做法（复刻原版 DataSharing）：保存状态后设置 dirty flag
-    // （ARM64 page+292 / ARM32 page+188），由框架在下一帧异步调用
-    // DataSharing 页面函数（已被 hook）重建页面。
-    if (tabId == CHECKBOX_VIEW_LOW_ID) {
-        log_write("View Angle checkbox LOW clicked page=%p id=%u", (void*)page, tabId);
-        set_view_angle_state(false);   // LOW = 低视角
-        *reinterpret_cast<uint8_t*>(page + SETTINGS_PAGE_DIRTY) = 1;  // dirty flag，异步重建
-        return 0;
-    }
-
-    if (tabId == CHECKBOX_VIEW_HIGH_ID) {
-        log_write("View Angle checkbox HIGH clicked page=%p id=%u", (void*)page, tabId);
-        set_view_angle_state(true);    // HIGH = 高视角
-        *reinterpret_cast<uint8_t*>(page + SETTINGS_PAGE_DIRTY) = 1;  // dirty flag，异步重建
-        return 0;
-    }
-
-    // 其他 Tab/事件：离开 View Angle 页面
-    g_isViewAnglePage = false;
-    if (oSettingsDispatch)
-        return oSettingsDispatch(page, tabId);
-    return 0;
-}
-
-// hook DataSharing 页面函数（ARM64 sub_A4EA34 / ARM32 sub_6D4420）：
-// dirty flag 触发重建时，根据 g_isViewAnglePage 决定创建哪个页面。
-// 当处于 View Angle 页面时，框架检测 dirty → 调用本函数 → 重建 View Angle；
-// 否则回落到原版 DataSharing 页面创建逻辑。
-static int hkSettingsCreatePage(uintptr_t page) {
-    if (g_isViewAnglePage) {
-        log_write("View Angle dirty-flag rebuild entered page=%p", (void*)page);
-        open_view_angle_page_arch(page);
-        return 0;   // 原版 sub_A4EA34/sub_6D4420 恒返 0
-    }
-    if (oSettingsCreatePage)
-        return oSettingsCreatePage(page);
-    return 0;
-}
-
-// ============================================================
-// open_view_angle_page — 严格复刻原版页面挂载尾部
-//
-// 参考原版函数：sub_A4EA34 (DataSharing) / sub_A514DC (BuildVersion)
-// 两个原版函数的页面挂载尾部完全一致，按以下步骤执行：
-//
-//   1. 获取 controller: page+216 → owner, owner+8 → controller
-//   2. 创建新内容: operator new(0xF0) + sub_A53C18(content)  [单参数]
-//   3. 设置 layout: content->vtable+416(content, x, y, w, h)
-//   4. 释放旧内容（如果 controller[208] 非零）:
-//      a. controller->vtable+96(controller)      — 通知 controller 释放
-//      b. oldContent->vtable+24(oldContent)      — 旧内容析构
-//      c. controller[208] = 0                    — 清空旧内容字段
-//   5. 挂载新内容:
-//      a. controller[208] = content               — 设置新内容字段
-//      b. controller->vtable+88(controller, content) — 通知 controller 挂载
-//   6. 页面布局: sub_A5084C(page)
-//
-// controller 字段偏移说明（来自原版反编译）：
-//   controller[26] 即 offset 208 (26 * 8 = 208) — 当前内容指针字段
-//   controller->vtable+88  — 挂载新内容方法
-//   controller->vtable+96  — 释放旧内容方法（通知 controller）
-//   oldContent->vtable+24  — 旧内容析构方法
-//
-// stage 日志编号设计：即使没有 logcat，也能通过本地文件确定崩溃发生在哪一步
-// ============================================================
-#ifdef __aarch64__
-static void open_view_angle_page(uintptr_t page) {
-    // ---- stage=10: dispatch 入口 ----
-    g_crash_stage = 10;
-    LZT_DEBUG_LOG("View Angle stage=10 dispatch entered page=%p", (void*)page);
-
-    if (!page) {
-        log_write("View Angle page skip: page null");
-        return;
-    }
-    if (!pSettingsContentCreate || !pSettingsScaleFloat || !pSettingsLayout) {
-        log_write("View Angle page skip: helpers unavailable content=%d scale=%d layout=%d",
-                  pSettingsContentCreate != nullptr, pSettingsScaleFloat != nullptr,
-                  pSettingsLayout != nullptr);
-        return;
-    }
-
-    // ---- stage=20: 读取 page+SETTINGS_PAGE_OWNER → owner ----
-    // 原版: v29 = *(_QWORD **)(*(_QWORD *)(a1 + 216) + 8LL);
-    //       即 owner = *(page + 216), controller = *(owner + 8)
-    g_crash_stage = 20;
-    uintptr_t owner = *reinterpret_cast<uintptr_t*>(page + SETTINGS_PAGE_OWNER);   // 0xD8
-    if (!owner) {
-        log_write("View Angle stage=20 fail: page+216 owner null page=%p", (void*)page);
-        return;
-    }
-    LZT_DEBUG_LOG("View Angle stage=20 owner loaded owner=%p", (void*)owner);
-
-    // ---- stage=30: 读取 owner+SETTINGS_OWNER_CONTROLLER → controller ----
-    g_crash_stage = 30;
-    uintptr_t controller = *reinterpret_cast<uintptr_t*>(owner + SETTINGS_OWNER_CONTROLLER);
-    if (!controller) {
-        log_write("View Angle stage=30 fail: controller null owner=%p", (void*)owner);
-        return;
-    }
-    LZT_DEBUG_LOG("View Angle stage=30 controller loaded controller=%p", (void*)controller);
-
-    // ---- stage=30 标题：交给原版本地化函数处理 ----
-    // set_controller_title 内部调用 sub_14F3354，自动完成方括号识别、
-    // 本地化表查找、缺失时加 missing 前缀，然后写入 controller 标题字段。
-    g_crash_stage = 30;
-    set_controller_title(controller, kViewAngleTitleKey);
-    LZT_DEBUG_LOG("View Angle stage=30 title localized controller=%p", (void*)controller);
-
-    // ---- stage=40: 分配新内容 operator new(0xF0) ----
-    // 原版: v11 = operator new(0xF0u);
-    g_crash_stage = 40;
-    uintptr_t content = reinterpret_cast<uintptr_t>(operator new(0xF0));
-    if (!content) {
-        log_write("View Angle stage=40 fail: content allocation failed");
-        return;
-    }
-    LZT_DEBUG_LOG("View Angle stage=40 content allocated content=%p", (void*)content);
-
-    // ---- stage=50: 调用 sub_A53C18(content) 构造内容 ----
-    // 原版: sub_A53C18(v11);  — 单参数，a1=content 指针
-    // sub_A53C18 内部会设置 vtable、创建子对象、调用 vtable+88 挂载子对象
-    g_crash_stage = 50;
-    LZT_DEBUG_LOG("View Angle stage=50 content constructor enter content=%p", (void*)content);
-    pSettingsContentCreate(content);
-
-    // ---- stage=60: 构造完成 ----
-    g_crash_stage = 60;
-    LZT_DEBUG_LOG("View Angle stage=60 content constructor returned content=%p", (void*)content);
-
-    // ---- stage=70: 解析 vtable 并准备 layout 参数 ----
-    // 原版: (*(void(**)(content, x, y, w, h))(*content + 416))(content, x, y, w, h)
-    // 注意：vtable 是函数指针数组，必须解引用 vtable[offset] 得到函数指针
-    //   错误: reinterpret_cast<T>(vtable + offset)  ← 这是数组条目的地址，不是函数指针
-    //   正确: reinterpret_cast<T>(*(uintptr_t*)(vtable + offset))  ← 解引用得到函数指针
-    g_crash_stage = 70;
-    uintptr_t contentVtable = *reinterpret_cast<uintptr_t*>(content);
-    using ContentLayout_t = void (*)(uintptr_t, uint32_t, uint32_t, uint32_t, uint32_t);
-    // 解引用 vtable[416/8] 得到函数指针
-    uintptr_t layoutFuncPtr = *reinterpret_cast<uintptr_t*>(contentVtable + 416);
-    auto setContentLayout = reinterpret_cast<ContentLayout_t>(layoutFuncPtr);
-
-    uintptr_t uiContext = *reinterpret_cast<uintptr_t*>(g_base + OFF_SettingsUIScaleContext);
-    if (!uiContext) {
-        log_write("View Angle stage=70 fail: UI scale context null");
-        return;
-    }
-    using SettingsContentWidth_t = float (*)();
-    auto getContentWidth = reinterpret_cast<SettingsContentWidth_t>(
-        g_base + OFF_SettingsContentWidth);
-    float fx = pSettingsScaleFloat(uiContext, 31.0f);
-    float fy = pSettingsScaleFloat(uiContext, 72.0f);
-    float fw = pSettingsScaleFloat(uiContext, getContentWidth());
-    float fh = pSettingsScaleFloat(uiContext, 380.0f);
-    uint32_t x = static_cast<uint32_t>(fx);
-    uint32_t y = static_cast<uint32_t>(fy);
-    uint32_t w = static_cast<uint32_t>(fw);
-    uint32_t h = static_cast<uint32_t>(fh);
-    LZT_DEBUG_LOG("View Angle stage=70 layout resolved vtable=%p funcPtr=%p x=%u y=%u w=%u h=%u",
-              (void*)contentVtable, (void*)layoutFuncPtr, x, y, w, h);
-
-    // ---- stage=80: 调用 content->vtable+416 设置布局 ----
-    setContentLayout(content, x, y, w, h);
-    g_crash_stage = 80;
-    LZT_DEBUG_LOG("View Angle stage=80 layout returned content=%p", (void*)content);
-
-    // ---- stage=85: 添加 Prompt 和 Checkbox 控件到 Content ----
-    // 参考 DataSharing (sub_A4EA34) 实现：
-    // 1. 创建 Checkbox: sub_A4DEAC(content, id, labelString, initialState, width)
-    // 2. 添加到 content: sub_A4DA68(content, widget, 0, uiScale)
-    g_crash_stage = 85;
-    if (!pCheckboxCreate || !pSettingsAddWidget) {
-        log_write("View Angle stage=85 skip: helpers unavailable create=%d addWidget=%d",
-                  pCheckboxCreate != nullptr, pSettingsAddWidget != nullptr);
-    } else {
-        // 读取当前状态（从配置对象或缓存读取，默认值为 true=高视角）
-        bool useHighViewAngle = get_view_angle_state();
-        
-        // UI Scale：DataSharing 原版调用 sub_7095C8(ctx, 0)，而该函数
-        // 返回 (int)(*(ctx+2440) * 0) = 0，所以 addWidget 的 scale 恒为 0。
-        float uiScale = 0.0f;
-        
-        // 精确复刻 DataSharing (sub_A4EA34) 的 Checkbox 宽度计算 v13：
-        //   v9  = sub_7095C8(ctx, 8)      = (int)(scale * 8)
-        //   v12 = (int)(v8 - v9)          = (int)(内容宽度*scale - 8*scale)
-        //   v13 = v12 - sub_7095C8(ctx,8) = (int)(内容宽度*scale - 16*scale)
-        // 其中 fw 已在 stage=70 计算为「内容宽度 * scale」。
-        float scale = pSettingsScaleFloat(uiContext, 1.0f);
-        int v9 = (int)(scale * 8.0f);
-        int checkboxWidth = (int)(fw - (float)v9) - v9;
-        
-        LZT_DEBUG_LOG("View Angle stage=85 creating widgets: state=%d scale=%.3f width=%d",
-                  useHighViewAngle, scale, checkboxWidth);
-        
-        // 创建 prompt 文本（位于 checkbox 上方，根据状态切换 HIGH/LOW 键）
-        add_view_angle_prompt(content, uiContext, scale, checkboxWidth, uiScale,
-                              useHighViewAngle);
-        LZT_DEBUG_LOG("View Angle stage=85 prompt added: %s",
-                  useHighViewAngle ? "HIGH" : "LOW");
-        
-        // 创建 Checkbox 标签字符串对象（用构造函数 sub_5EC760，与 DataSharing 一致）
-        alignas(16) uint8_t lowLabelString[24] = {};
-        alignas(16) uint8_t highLabelString[24] = {};
-        pSettingsTitleStringCreate(reinterpret_cast<uintptr_t>(lowLabelString),
-                                   reinterpret_cast<uintptr_t>(kViewLowLabel), 0xA);
-        pSettingsTitleStringCreate(reinterpret_cast<uintptr_t>(highLabelString),
-                                   reinterpret_cast<uintptr_t>(kViewHighLabel), 0xB);
-        
-        // 创建并添加 VIEW_LOW Checkbox (ID=31)
-        // 注意：sub_A4DEAC 第一个参数是 page（页面对象），不是 content！
-        // 它内部会读 page+192 / page+208 作为 checkbox 的回调字段。
-        // 当 useHighViewAngle=false 时选中
-        uintptr_t checkboxLow = pCheckboxCreate(
-            page,
-            CHECKBOX_VIEW_LOW_ID,
-            reinterpret_cast<uintptr_t>(lowLabelString),
-            !useHighViewAngle ? 1 : 0,
-            checkboxWidth
-        );
-        pSettingsAddWidget(content, checkboxLow, 0, uiScale);
-        LZT_DEBUG_LOG("View Angle stage=85 added LOW checkbox: widget=%p width=%d",
-                  (void*)checkboxLow, checkboxWidth);
-        
-        // 创建并添加 VIEW_HIGH Checkbox (ID=32)
-        // 当 useHighViewAngle=true 时选中
-        uintptr_t checkboxHigh = pCheckboxCreate(
-            page,
-            CHECKBOX_VIEW_HIGH_ID,
-            reinterpret_cast<uintptr_t>(highLabelString),
-            useHighViewAngle ? 1 : 0,
-            checkboxWidth
-        );
-        pSettingsAddWidget(content, checkboxHigh, 0, uiScale);
-        LZT_DEBUG_LOG("View Angle stage=85 added HIGH checkbox: widget=%p width=%d",
-                  (void*)checkboxHigh, checkboxWidth);
-        
-        LZT_DEBUG_LOG("View Angle stage=85 widgets complete: low=%p high=%p state=%d",
-                  (void*)checkboxLow, (void*)checkboxHigh, useHighViewAngle);
-    }
-
-    // ---- stage=90: 读取 controller vtable 和旧内容指针 ----
-    // 原版:
-    //   v30 = controller;
-    //   if (v30[26] != 0) { ... }  // v30[26] = *(controller + 208)
-    g_crash_stage = 90;
-    uintptr_t controllerVtable = *reinterpret_cast<uintptr_t*>(controller);
-    uintptr_t oldContent = *reinterpret_cast<uintptr_t*>(controller + SETTINGS_CONTROLLER_CONTENT);  // controller[26]
-    LZT_DEBUG_LOG("View Angle stage=90 controller vtable=%p oldContent=%p",
-              (void*)controllerVtable, (void*)oldContent);
-
-    // ---- stage=100: 释放旧内容（严格复刻原版 sub_A4EA34）----
-    // 原版:
-    //   if (v30[26] != 0) {
-    //       (*(void(**)(*v30 + 96))(v30, v30[26]); // controller.vtable[96/8](controller, oldContent)
-    //       v31 = v30[26];                         // 重新读取旧内容（可能被上一步清零）
-    //       if (v31 != 0)
-    //           (*(void(**)(*v31 + 24))(v31);     // oldContent.vtable[24/8](oldContent)
-    //       v30[26] = 0;                           // 清空旧内容字段
-    //   }
-    g_crash_stage = 100;
-    if (oldContent != 0) {
-        LZT_DEBUG_LOG("View Angle stage=100 release old content old=%p", (void*)oldContent);
-        // a. controller->vtable[96/8](controller, oldContent) — 通知 controller 从链表移除旧内容
-        //    注意：必须传第二个参数 oldContent（X1）。sub_169A024 靠它定位要移除的链表节点，
-        //    缺了它旧内容会残留在 controller 链表里成为悬空指针，导致后续遍历崩溃。
-        using ReleaseNotify_t = void (*)(uintptr_t, uintptr_t);
-        uintptr_t releaseFuncPtr = *reinterpret_cast<uintptr_t*>(controllerVtable + 96);
-        auto releaseNotify = reinterpret_cast<ReleaseNotify_t>(releaseFuncPtr);
-        releaseNotify(controller, oldContent);
-        // b. 重新读取旧内容（releaseNotify 可能已将其清零）
-        uintptr_t oldContent2 = *reinterpret_cast<uintptr_t*>(controller + SETTINGS_CONTROLLER_CONTENT);
-        if (oldContent2 != 0) {
-            // c. oldContent->vtable[24/8](oldContent) — 旧内容析构
-            uintptr_t oldVtable = *reinterpret_cast<uintptr_t*>(oldContent2);
-            using Destruct_t = void (*)(uintptr_t);
-            uintptr_t destructFuncPtr = *reinterpret_cast<uintptr_t*>(oldVtable + 24);
-            auto destruct = reinterpret_cast<Destruct_t>(destructFuncPtr);
-            destruct(oldContent2);
-        }
-        // d. 清空旧内容字段
-        *reinterpret_cast<uintptr_t*>(controller + SETTINGS_CONTROLLER_CONTENT) = 0;
-        LZT_DEBUG_LOG("View Angle stage=100 old content released");
-    } else {
-        LZT_DEBUG_LOG("View Angle stage=100 no old content");
-    }
-
-    // ---- stage=110: 挂载新内容（严格复刻原版）----
-    // 原版:
-    //   v32 = *v30;                          // 重新读取 controller vtable（可能被释放步骤修改）
-    //   v30[26] = v11;                       // controller[208] = 新内容
-    //   (*(void(**)(v30, v11))(v32 + 88);   // controller.vtable[88/8](controller, 新内容)
-    g_crash_stage = 110;
-    LZT_DEBUG_LOG("View Angle stage=110 new content attach begin content=%p", (void*)content);
-
-    // 重新读取 controllerVtable（releaseNotify 可能修改了 vtable，原版在此处重新读取 *v30）
-    controllerVtable = *reinterpret_cast<uintptr_t*>(controller);
-
-    // 步骤 a: controller[208] = 新内容
-    *reinterpret_cast<uintptr_t*>(controller + SETTINGS_CONTROLLER_CONTENT) = content;
-
-    // 步骤 b: controller->vtable[88/8](controller, content)
-    // 解引用 vtable[88/8] 得到函数指针
-    using AttachNew_t = void (*)(uintptr_t, uintptr_t);
-    uintptr_t attachFuncPtr = *reinterpret_cast<uintptr_t*>(controllerVtable + 88);
-    auto attachNew = reinterpret_cast<AttachNew_t>(attachFuncPtr);
-    LZT_DEBUG_LOG("View Angle stage=110 attach funcPtr=%p", (void*)attachFuncPtr);
-    attachNew(controller, content);
-
-    g_crash_stage = 120;
-    LZT_DEBUG_LOG("View Angle stage=120 new content attach returned content=%p", (void*)content);
-
-    // ---- stage=130: 页面布局 sub_A5084C(page) ----
-    // 原版没有显式调用 sub_A5084C，但原版页面函数本身包含布局逻辑
-    // 我们的独立页面需要手动触发布局
-    g_crash_stage = 130;
-    LZT_DEBUG_LOG("View Angle stage=130 sub_A5084C (layout) begin page=%p", (void*)page);
-    pSettingsLayout(page);
-
-    // ---- stage=140: 布局完成 ----
-    g_crash_stage = 140;
-    LZT_DEBUG_LOG("View Angle stage=140 sub_A5084C (layout) returned page=%p", (void*)page);
-
-    // ---- stage=150: 全部成功 ----
-    g_crash_stage = 150;
-    log_write("View Angle stage=150 page success page=%p content=%p controller=%p",
-              (void*)page, (void*)content, (void*)controller);
-}
-#endif
-
-#ifdef __arm__
-// ============================================================
-// open_view_angle_page32 — 严格照抄 ARM32 DataSharing 页面函数 sub_6D4420
-//
-// 与 ARM64 版的核心差异（均有 IDA 反编译依据）：
-//   1. controller = *(*(page+148)+4)（ARM64 page+216/owner+8）
-//   2. 标题走原版 sub_6D7AD0(controller, wstring)，无需手动写偏移
-//   3. y 基准 = scaleFloat(72.0f)（v37 修正：原版立即数 0x42900000=72.0，此前误写 80.0）
-//   4. content 分配 0xA8（ARM64 0xF0），容器 0x94（ARM64 0xD0）
-//   5. vtable 槽位：layout=+208、setPos=+212（ARM64 +416/+424，同为 52/53 槽）
-//   6. 文本标签 sub_132DA4C 参数序 (ctx,fontsize,0,w,h,str,0,0,style)，
-//      ARM64 为 (ctx,str,0,0,style,fontsize,x,w,h)
-//   7. 挂载走原版 sub_6D3AA4(controller, content)——内部自带
-//      "释放旧内容(vtable+48/+12) + 挂载新内容(vtable+44)"完整逻辑
-//   8. checkbox 宽度 = checkboxWidth - 8*scale（ARM64 直接用 checkboxWidth）
-// ============================================================
-
-// v34：调用 float 返回值在 S0 的 ARM32 游戏函数。
-// 背景：sub_6D3FD0（Settings 内容宽度）查询 InboxReleaseNotesInSettings 开关后
-// 返回 415.0/545.0，返回值放在 S0（VFP），R0 留给内存审计差值。本 so 是
-// softfp（float 声明从 R0 取返回值），C 函数指针声明会读到审计差值（实测 0）
-// → 页面宽度 w=-20 负值 → 页面不可见。必须用内联汇编调用并从 S0 取位模式。
-static float call_s0_float(uintptr_t fn) {
-    uint32_t bits;
-    __asm__ volatile(
-        "blx %[fn]\n"
-        "vmov %[bits], s0\n"
-        : [bits] "=r"(bits)
-        : [fn] "r"(fn)
-        : "r0", "r1", "r2", "r3", "r12", "lr", "s0", "memory", "cc");
-    float f;
-    memcpy(&f, &bits, 4);
-    return f;
-}
-
-// ARM32 文本标签创建（softfp ABI：float 参数经核心寄存器传位模式，
-// 用 float 类型声明即可与游戏函数布局一致）
-typedef uintptr_t (*TextLabelCreate32_t)(uintptr_t ctx, float fontsize, int a3,
-                                         float width, float height, uintptr_t strObj,
-                                         int a7, int a8, uintptr_t style);
-
-// 创建 prompt 文本并挂到 content（照抄 sub_6D4420 prompt 段）
-// checkboxWidth 为原版 v10 = (int)(内容宽*scale - 8*scale)
-static void add_view_angle_prompt32(uintptr_t content, uintptr_t uiContext,
-                                    int checkboxWidth, bool useHighViewAngle) {
-    const wchar_t* promptKey = useHighViewAngle ? kViewAngleHighPrompt : kViewAngleLowPrompt;
-
-    // 1. 本地化 prompt 键（sub_10F6754(out12B, key)，缺省键原样拷贝）
-    LocalizedString promptStr = {};
-    auto localizeKey = reinterpret_cast<void (*)(uintptr_t, const wchar_t*)>(
-        g_base + OFF_LocalizeKey);
-    localizeKey(reinterpret_cast<uintptr_t>(&promptStr), promptKey);
-
-    // 2. 加载文本上下文
-    uintptr_t fontConfig = *reinterpret_cast<uintptr_t*>(g_base + OFF_FontContext);
-    auto fontLoad = reinterpret_cast<FontLoad_t>(g_base + OFF_FontLoad);
-    uintptr_t textCtx = fontLoad(fontConfig);
-    LZT_DEBUG_LOG("View Angle32 prompt ctx: fontCfg=%p textCtx=%p",
-              (void*)fontConfig, (void*)textCtx);
-
-    // 3. 文本测量：promptW = checkboxWidth - 8*scale - 20*scale（原版 v48）
-    //    宽度出参原版写入独立缓冲 v43 后丢弃——不能传 &rect[0]，否则容器 x 被测量宽度覆写
-    auto scaleInt = reinterpret_cast<int (*)(uintptr_t, int)>(g_base + OFF_SettingsUIScale);
-    int promptWidth = checkboxWidth - scaleInt(uiContext, 8) - scaleInt(uiContext, 20);
-    uint32_t measureW = 0;                              // 原版 v43：丢弃的宽度出参
-    uint32_t rect[4] = {
-        (uint32_t)scaleInt(uiContext, 4),   // x（原版 v47[0]）
-        (uint32_t)scaleInt(uiContext, 2),   // y（原版 v47[1]）
-        (uint32_t)promptWidth,              // w（原版 v48，栈上紧随 v47）
-        0                                   // h（先置 0，测量后回填；原版 v49）
-    };
-    auto textMeasure = reinterpret_cast<TextMeasure_t>(g_base + OFF_TextMeasure);
-    textMeasure(textCtx, reinterpret_cast<uintptr_t>(&promptStr),
-                &measureW, &rect[3], (float)promptWidth);   // outH 写回 rect[3]
-    rect[3] += (uint32_t)scaleInt(uiContext, 10);
-
-    // 4. 创建文本容器 new(0x94) + 构造 + setPos(vtable+212, rect4)
-    uintptr_t container = reinterpret_cast<uintptr_t>(operator new(0x94));
-    auto containerCreate = reinterpret_cast<TextContainerCreate_t>(g_base + OFF_TextContainerCreate);
-    containerCreate(container);
-    uintptr_t containerVtable = *reinterpret_cast<uintptr_t*>(container);
-    uintptr_t setPosFunc = *reinterpret_cast<uintptr_t*>(containerVtable + SETTINGS_VT_SETPOS);
-    reinterpret_cast<ContainerSetPos_t>(setPosFunc)(container, rect);
-
-    // 5. 创建文本标签（ARM32 参数序，第二次 fontLoad 与原版一致）
-    uintptr_t textCtx2 = fontLoad(fontConfig);
-    float fontSize = (float)scaleInt(uiContext, 8);
-    // v36 回退：style 源就是槽地址本身（base+0x1E4DDAC）。v35 误加解引用导致
-    // styleCopy 读 .bss 变量内容（运行时 0/垃圾）→ SIGSEGV 闪退。v36 汇编复核：
-    // 原版 sub_6D4420 @0x6D4770 LDR R0,[pool]=0x1719398；@0x6D4774 LDR R1,[PC,R0]
-    // 的源地址 = 0x6D477C+0x1719398 = .got 槽 0x1DEDB14，槽内容（link-time 0x1E4DDAC，
-    // 运行时重定位为 base+0x1E4DDAC）装入 R1 —— 即 R1 = base+0x1E4DDAC = 变量地址本身，
-    // 0x1E4DDAC 处内联存 16 字节 style 数据（.bss 静态 0，运行时初始化代码填充）。
-    // IDA 注释 "; unk_1E4DDAC" 标注的是【加载值】不是【源地址】，v35 把它读反了。
-    alignas(16) uint8_t style[16];
-    auto styleCopy = reinterpret_cast<void (*)(uintptr_t, uintptr_t)>(g_base + OFF_StyleCopy);
-    styleCopy(reinterpret_cast<uintptr_t>(style), g_base + OFF_PromptStyle);
-    uint32_t* styleDump = reinterpret_cast<uint32_t*>(g_base + OFF_PromptStyle);
-    auto labelCreate = reinterpret_cast<TextLabelCreate32_t>(g_base + OFF_TextLabelCreate);
-    uintptr_t label = labelCreate(textCtx2, fontSize, 0,
-                                  (float)promptWidth, (float)rect[3],
-                                  reinterpret_cast<uintptr_t>(&promptStr), 0, 0,
-                                  reinterpret_cast<uintptr_t>(style));
-    LZT_DEBUG_LOG("View Angle32 prompt detail: fontCtx2=%p label=%p promptW=%d rectH=%u "
-              "fontSize=%.1f style16=[%08X %08X %08X %08X]",
-              (void*)textCtx2, (void*)label,
-              promptWidth, rect[3], fontSize,
-              styleDump[0], styleDump[1], styleDump[2], styleDump[3]);
-
-    // 6. 标签加入容器，容器加入 content（uiScale = scaleInt(ctx,0) = 0，与原版一致）
-    auto containerAdd = reinterpret_cast<TextContainerAdd_t>(g_base + OFF_TextContainerAdd);
-    containerAdd(container, label);
-    float zeroScale = (float)scaleInt(uiContext, 0);
-    pSettingsAddWidget(content, container, 0, zeroScale);
-
-    free_game_string(promptStr);
-}
-
-static void open_view_angle_page32(uintptr_t page) {
-    g_crash_stage = 10;
-    LZT_DEBUG_LOG("View Angle32 stage=10 dispatch entered page=%p", (void*)page);
-
-    if (!page) {
-        log_write("View Angle32 page skip: page null");
-        return;
-    }
-    if (!pSettingsContentCreate || !pSettingsScaleFloat ||
-        !pSettingsStringCreate) {
-        log_write("View Angle32 page skip: helpers unavailable content=%d scale=%d str=%d",
-                  pSettingsContentCreate != nullptr, pSettingsScaleFloat != nullptr,
-                  pSettingsStringCreate != nullptr);
-        return;
-    }
-
-    // ---- stage=20/30: controller = *(*(page+148)+4) ----
-    g_crash_stage = 20;
-    uintptr_t owner = *reinterpret_cast<uintptr_t*>(page + SETTINGS_PAGE_OWNER);
-    if (!owner) {
-        log_write("View Angle32 stage=20 fail: page+148 owner null page=%p", (void*)page);
-        return;
-    }
-    g_crash_stage = 30;
-    uintptr_t controller = *reinterpret_cast<uintptr_t*>(owner + SETTINGS_OWNER_CONTROLLER);
-    if (!controller) {
-        log_write("View Angle32 stage=30 fail: controller null owner=%p", (void*)owner);
-        return;
-    }
-    LZT_DEBUG_LOG("View Angle32 stage=30 controller=%p", (void*)controller);
-
-    // ---- 标题：wstring 构造 + 原版 sub_6D7AD0(controller, wstr) ----
-    GameString titleStr = {};
-    pSettingsStringCreate(reinterpret_cast<uintptr_t>(&titleStr),
-                          reinterpret_cast<uintptr_t>(kViewAngleTitleKey), 0x12);
-    auto setTitle = reinterpret_cast<void (*)(uintptr_t, uintptr_t)>(
-        g_base + OFF_SetControllerTitle);
-    setTitle(controller, reinterpret_cast<uintptr_t>(&titleStr));
-    free_game_string(titleStr);
-
-    // ---- stage=40: 布局参数（照抄 sub_6D4420 数值）----
-    g_crash_stage = 40;
-    uintptr_t uiContext = *reinterpret_cast<uintptr_t*>(g_base + OFF_SettingsUIScaleContext);
-    if (!uiContext) {
-        log_write("View Angle32 stage=40 fail: UI scale context null");
-        return;
-    }
-    auto scaleInt = reinterpret_cast<int (*)(uintptr_t, int)>(g_base + OFF_SettingsUIScale);
-    // v34：sub_6D3FD0 的 float 返回值在 S0（R0 是内存审计差值），必须走
-    // call_s0_float 取值；此前 float(*)() 声明读到 0 → checkboxWidth=-20。
-    float rawContentW = call_s0_float(g_base + OFF_SettingsContentWidth);
-    float fx = pSettingsScaleFloat(uiContext, 30.0f) + (float)scaleInt(uiContext, 4);  // 原版 v4=scaleFloat(30.0)+scaleInt(4)
-    // v37：原版 @0x6D449C 立即数 0x42900000 = 72.0f（v32 起误写 80.0f，y 偏移 20px）
-    float fy = pSettingsScaleFloat(uiContext, 72.0f);
-    float fw = pSettingsScaleFloat(uiContext, rawContentW);
-    float fh = pSettingsScaleFloat(uiContext, 380.0f);
-    int checkboxWidth = (int)(fw - (float)scaleInt(uiContext, 8));
-    LZT_DEBUG_LOG("View Angle32 stage=40 layout x=%d y=%d w=%d h=%d (contentW=%.1f)",
-              (int)fx, (int)fy, checkboxWidth, (int)fh, rawContentW);
-
-    // ---- stage=50: content = new(0xA8) + 构造 + 初始 layout(vtable+208 单参) ----
-    g_crash_stage = 50;
-    uintptr_t content = reinterpret_cast<uintptr_t>(operator new(0xA8));
-    if (!content) {
-        log_write("View Angle32 stage=50 fail: content allocation failed");
-        return;
-    }
-    pSettingsContentCreate(content);
-    g_crash_stage = 60;
-    uintptr_t contentVtable = *reinterpret_cast<uintptr_t*>(content);
-    uintptr_t layoutFunc = *reinterpret_cast<uintptr_t*>(contentVtable + SETTINGS_VT_LAYOUT);
-    // v37：照抄原版 sub_6D4420 @0x6D4580——构造后【立即】五参调 vtable+0xD0，
-    // 给后续 addWidget 提供正确基准。v32~v36 误用单参调用该五参槽函数（R1~R3/
-    // 栈全是调用残留垃圾）→ 子控件按垃圾 rect 定位 → stage=90 修正 content 自身
-    // 后背景可见，但三个子控件坐标已按错误基准算完 → 全部不可见（v34 症状根因）
-    reinterpret_cast<void (*)(uintptr_t, uint32_t, uint32_t, uint32_t, uint32_t)>(layoutFunc)(
-        content, (uint32_t)(int)fx, (uint32_t)(int)fy,
-        (uint32_t)checkboxWidth, (uint32_t)(int)fh);
-    LZT_DEBUG_LOG("View Angle32 stage=60 content ready content=%p", (void*)content);
-
-    // ---- stage=85: prompt + checkbox（照抄 sub_6D4420 中段）----
-    g_crash_stage = 85;
-    if (!pCheckboxCreate || !pSettingsAddWidget) {
-        log_write("View Angle32 stage=85 skip: helpers unavailable create=%d addWidget=%d",
-                  pCheckboxCreate != nullptr, pSettingsAddWidget != nullptr);
-    } else {
-        bool useHighViewAngle = get_view_angle_state();
-        int checkboxW = checkboxWidth - scaleInt(uiContext, 8);
-        float zeroScale = (float)scaleInt(uiContext, 0);
-
-        add_view_angle_prompt32(content, uiContext, checkboxWidth, useHighViewAngle);
-        LZT_DEBUG_LOG("View Angle32 stage=85 prompt added: %s",
-                  useHighViewAngle ? "HIGH" : "LOW");
-
-        GameString lowLabel = {}, highLabel = {};
-        pSettingsStringCreate(reinterpret_cast<uintptr_t>(&lowLabel),
-                              reinterpret_cast<uintptr_t>(kViewLowLabel), 0xA);
-        pSettingsStringCreate(reinterpret_cast<uintptr_t>(&highLabel),
-                              reinterpret_cast<uintptr_t>(kViewHighLabel), 0xB);
-        uintptr_t checkboxLow = pCheckboxCreate(
-            page, CHECKBOX_VIEW_LOW_ID,
-            reinterpret_cast<uintptr_t>(&lowLabel),
-            !useHighViewAngle ? 1 : 0, checkboxW);
-        pSettingsAddWidget(content, checkboxLow, 0, zeroScale);
-        free_game_string(lowLabel);
-        uintptr_t checkboxHigh = pCheckboxCreate(
-            page, CHECKBOX_VIEW_HIGH_ID,
-            reinterpret_cast<uintptr_t>(&highLabel),
-            useHighViewAngle ? 1 : 0, checkboxW);
-        pSettingsAddWidget(content, checkboxHigh, 0, zeroScale);
-        free_game_string(highLabel);
-        LZT_DEBUG_LOG("View Angle32 stage=85 widgets complete: low=%p high=%p state=%d",
-                  (void*)checkboxLow, (void*)checkboxHigh, useHighViewAngle);
-        // v35 诊断：checkbox 内部字段（sub_6D3830 写 +144=宽度 +148=1 标志；
-        // vtable+212 为 setPos 槽）——用于排查 checkbox 不可见
-        for (int i = 0; i < 2; i++) {
-            uintptr_t cb = i == 0 ? checkboxLow : checkboxHigh;
-            if (!cb) continue;
-            uintptr_t vt = *reinterpret_cast<uintptr_t*>(cb);
-            LZT_DEBUG_LOG("View Angle32 checkbox[%d] detail: cb=%p vt=%p w144=%d f148=%d",
-                      i, (void*)cb, (void*)vt,
-                      *reinterpret_cast<int*>(cb + CHECKBOX_WIDTH),
-                      *reinterpret_cast<int*>(cb + CHECKBOX_STATE));
-        }
-    }
-
-    // ---- stage=90: 第二次五参 layout(vtable+208)，照抄原版 @0x6D4920-40 ----
-    // 三次 addWidget 完成后【再次】调用同一五参 layout 刷新子控件布局
-    g_crash_stage = 90;
-    contentVtable = *reinterpret_cast<uintptr_t*>(content);
-    layoutFunc = *reinterpret_cast<uintptr_t*>(contentVtable + SETTINGS_VT_LAYOUT);
-    reinterpret_cast<void (*)(uintptr_t, uint32_t, uint32_t, uint32_t, uint32_t)>(layoutFunc)(
-        content, (uint32_t)(int)fx, (uint32_t)(int)fy,
-        (uint32_t)checkboxWidth, (uint32_t)(int)fh);
-
-    g_crash_stage = 100;
-    // v37：照抄原版 @0x6D4944——mount 前从 page 重新取 controller，不用旧局部值
-    controller = *reinterpret_cast<uintptr_t*>(
-        *reinterpret_cast<uintptr_t*>(page + SETTINGS_PAGE_OWNER) +
-        SETTINGS_OWNER_CONTROLLER);
-    auto mountContent = reinterpret_cast<void (*)(uintptr_t, uintptr_t)>(
-        g_base + OFF_MountContent);
-    mountContent(controller, content);
-
-    // v37：删除 pSettingsLayout(page)——原版 sub_6D4420 在 mount 后直接返回，
-    // 没有任何页面级 layout 调用（v32 起误从 ARM64 版移植，ARM64 有自己的理由）
-
-    g_crash_stage = 150;
-    log_write("View Angle32 stage=150 page success page=%p content=%p controller=%p",
-              (void*)page, (void*)content, (void*)controller);
-}
-#endif
 
 // ---- Hook 0: BoardZoom2（强制 board[280]=1.0 高视角） ----
 // 目标函数：
@@ -1996,7 +944,7 @@ static void trigger_shake_board(uintptr_t board, bool fromDefer) {
 #ifdef __arm__
 static bool fix_direction_start32(uintptr_t board, uintptr_t outStart,
                                   float uiScale, long selector) {
-    if (!board || !outStart || uiScale <= 0.1f || get_view_angle_state()) return false;
+    if (!board || !outStart || uiScale <= 0.1f || view_angle_state_high()) return false;
     float aspect = get_aspect_ratio();
     if (!should_align_for_view(aspect, false)) return false;
 
@@ -2042,7 +990,7 @@ static long hkA23A8C(uintptr_t selector, uintptr_t a2, uintptr_t a3) {
     int endX   = *(int*)a3;
 
     if (!board) {
-        LZT_DEBUG_LOG("A23A8C selector=%ld ret=%ld startX=%d endX=%d (board=null)",
+        LZT_DBG_LOG("A23A8C selector=%ld ret=%ld startX=%d endX=%d (board=null)",
                   (long)selector, ret, startX, endX);
         return ret;
     }
@@ -2054,7 +1002,7 @@ static long hkA23A8C(uintptr_t selector, uintptr_t a2, uintptr_t a3) {
     int b285 = *(int*)(board + BOARD_285);
     int b286 = *(int*)(board + BOARD_286);
     float scale = *(float*)(board + BOARD_280);
-    LZT_DEBUG_LOG("A23A8C selector=%ld ret=%ld startX=%d endX=%d | board %s=%d b270=%d b281=%.1f b283=%d b284=%d b285=%d b286=%d scale=%.4f uiScale=%.4f",
+    LZT_DBG_LOG("A23A8C selector=%ld ret=%ld startX=%d endX=%d | board %s=%d b270=%d b281=%.1f b283=%d b284=%d b285=%d b286=%d scale=%.4f uiScale=%.4f",
               (long)selector, ret, startX, endX,
 #ifdef __aarch64__
               "b17",
@@ -2094,7 +1042,7 @@ static long hkC187C(int a1, int a2, int a3, int a4, int a5, C187CArg6 a6) {
     // 因此 ARM32 修正已移到方向表输出层，禁止在这里改参数。
 #ifdef __aarch64__
     float aspect = get_aspect_ratio();
-    bool highView = get_view_angle_state();
+    bool highView = view_angle_state_high();
     if (a5 == 4 && !highView && should_align_for_view(aspect, false)) {
         uintptr_t displayInfo = *(uintptr_t*)(g_base + OFF_G_DisplayInfo);
         uintptr_t board = displayInfo ? *(uintptr_t*)(displayInfo + DISPLAYINFO_BOARD) : 0;
@@ -2120,12 +1068,12 @@ static long hkC187C(int a1, int a2, int a3, int a4, int a5, C187CArg6 a6) {
     // 只打印相机平移 action（a5==4），避免 MoveBoard 其他用途刷屏
     if (a5 == 4) {
 #ifdef __aarch64__
-        LZT_DEBUG_LOG("C187C MoveBoard: xStart=%d xEnd=%d a3=%d a4=%d a5=%d dur=%.2f ret=%ld",
+        LZT_DBG_LOG("C187C MoveBoard: xStart=%d xEnd=%d a3=%d a4=%d a5=%d dur=%.2f ret=%ld",
                   a1, a2, a3, a4, a5, a6, ret);
 #else
         float duration;
         memcpy(&duration, &a1, sizeof(duration));
-        LZT_DEBUG_LOG("C187C MoveBoard32: xStart=%d xEnd=%d y=%d type=%d flag=%d dur=%.2f ret=%ld",
+        LZT_DBG_LOG("C187C MoveBoard32: xStart=%d xEnd=%d y=%d type=%d flag=%d dur=%.2f ret=%ld",
                   a2, a3, a4, a5, a6, duration, ret);
 #endif
     }
@@ -2155,7 +1103,7 @@ static uintptr_t hkStreetDinos(uintptr_t ctx, unsigned int xBase, char spawnMode
         return 0;
     }
     float aspect = get_aspect_ratio();
-    bool highView = get_view_angle_state();
+    bool highView = view_angle_state_high();
     uintptr_t snapshotBoard = g_orig_b270_board.load(std::memory_order_acquire);
     int origB270 = g_orig_b270.load(std::memory_order_relaxed);
     if (snapshotBoard != 0 &&
@@ -2198,6 +1146,12 @@ static AEF69C_t oAEF69C = nullptr;
 [[maybe_unused]] static float hkAEF69C(uintptr_t board, int *coords) {
     if (!oAEF69C) {
         return 0.0f;
+    }
+    // v49 防御加固：coords/board 异常时跳过诊断采样、直接透传原函数，
+    // 保持游戏行为不变（渲染热路径上任何空指针解引用都会杀死进程；
+    // 本 hook 仅 Debug 版安装）
+    if (!board || !coords) {
+        return oAEF69C(board, coords);
     }
     int inX = coords[0];
     int inY = coords[1];
@@ -2408,7 +1362,7 @@ static long hkShakeBoard(uintptr_t board, int xAmt, int yAmt, float duration) {
               *(int*)(board + BOARD_284), *(float*)(board + BOARD_280),
               (int)*(uint8_t*)(board + 900));
 #else
-    if constexpr (lawn_zoom_tab::kDebugMode) {
+    if constexpr (lzt_config::kDebugMode) {
         snapshot_note_shake_call(board); // 开 3s 快照采样窗（SHAKE-BEGIN/SNAP/END）
         log_write("SHAKE call: xAmt=%d yAmt=%d dur=%.3f | lawnW=%d b270=%d b284=%d "
                   "scale=%.3f",
@@ -2478,7 +1432,7 @@ static bool board_scale_ready(uintptr_t board, bool highView) {
 
 static AlignResult run_board_align(uintptr_t board, const char* tag) {
     // 视角状态在执行时刻读取（延迟线程的执行时刻晚于 H1 触发时刻）
-    bool highView = get_view_angle_state();
+    bool highView = view_angle_state_high();
     float post_scale = *(float*)(board + BOARD_280);
     int b283 = *(int*)(board + BOARD_283);
     int b286 = *(int*)(board + BOARD_286);
@@ -2513,6 +1467,24 @@ static AlignResult run_board_align(uintptr_t board, const char* tag) {
                   "reason=%s scale=%.4f",
                   tag, highView, blackEdge, aspect, screenWidth, boardPixelWidth,
                   highView ? "tablet" : "non-widescreen-lowview", post_scale);
+        // v49 稳态自愈：非对齐视角（高视角窄屏平板 / 低视角非宽屏）下，
+        // 检查相机渲染偏移残留。背景："高视角关卡保存退出 → 切换视角重进"
+        // 场景中 Board 内存高频复用（watchdog memory reused 实证），camR
+        // 残留上一次对齐写入的 leftAlign；本视角若不需要对齐则走本分支
+        // 完全跳过，camR 与 b270 失配（实测残留 557 vs 稳态 687 = 左偏
+        // 130px），平时被游戏 resume 恢复逻辑按 b270 刷新所掩盖，一旦
+        // 灰烬类植物震屏把 camX 推至 clamp 边界停驻即暴露为永久左偏。
+        // 稳态恒等关系 camR == b270（v23 实测震屏恢复逻辑回归位 + 对齐前
+        // camR36 sync 日志旧值恒等 old_b270 + v24 耦合结构），据此在此把
+        // camR 拉回当前 b270：单字段条件写入，时机与 v27/v39 直写相同
+        // （H1 布局早期/暂停态安全窗口），稳态时零干扰。
+        int camR_now = *(int*)(board + BOARD_CAM_RENDER_X);
+        int b270_steady = *(int*)(board + BOARD_270);
+        if (camR_now != b270_steady) {
+            *(int*)(board + BOARD_CAM_RENDER_X) = b270_steady;
+            log_write("%s camR self-heal: %d -> %d (steady-state b270 sync, "
+                      "view=%d)", tag, camR_now, b270_steady, highView ? 1 : 0);
+        }
         return ALIGN_SKIP_TABLET;
     }
 
@@ -2596,14 +1568,14 @@ static AlignResult run_board_align(uintptr_t board, const char* tag) {
         float b281f = *(float*)(board + BOARD_281);
         float lp = b281f + (float)b283 + post_scale * ((float)leftAlign - b281f);
         float rp = lp + post_scale * (float)boardPixelWidth;
-        LZT_DEBUG_LOG("%s lowview-predict: L=%.1f (want 0..1) R=%.1f cover_margin=%.1f "
+        LZT_DBG_LOG("%s lowview-predict: L=%.1f (want 0..1) R=%.1f cover_margin=%.1f "
                   "(b281=%.1f scale=%.4f b284=%d bpw=%d)",
                   tag, lp, rp, rp - (float)screenWidth, b281f, post_scale,
                   leftAlign, boardPixelWidth);
     }
     // 诊断：回读 board 字段，确认修改已生效（camR36=相机渲染X偏移：ARM64 即
     // b17@+0x44，ARM32 为 v39 新定位的 board+0x24；board[281] 为坐标转换字段）
-    LZT_DEBUG_LOG("%s BoardZoom READBACK: camR36=%d b270=%d b281=%.1f b283=%d b284=%d b285=%d b286=%d",
+    LZT_DBG_LOG("%s BoardZoom READBACK: camR36=%d b270=%d b281=%.1f b283=%d b284=%d b285=%d b286=%d",
               tag, *(int*)(board + BOARD_CAM_RENDER_X), *(int*)(board + BOARD_270), *(float*)(board + BOARD_281),
               *(int*)(board + BOARD_283),
               *(int*)(board + BOARD_284), *(int*)(board + BOARD_285),
@@ -2671,7 +1643,7 @@ static void start_deferred_align(uintptr_t board) {
             // 恒不满足 → DEFER 空等，暂停画面停在保存的高视角相机位直到植物
             // 震屏才被拉到原版位。DEFER 会先重跑 oBoardZoom 修复 b283，再走
             // run_board_align 的严格守卫，故此处只需 scale 终值 + b281 就绪。
-            bool deferHighView = get_view_angle_state();
+            bool deferHighView = view_angle_state_high();
             if (board_scale_ready(my_board, deferHighView)) {
                 log_write("DEFER: layout ready (scale=%.4f), rerun BoardZoom + align",
                           *(float*)(my_board + BOARD_280));
@@ -2741,7 +1713,7 @@ static long hkBoardZoom(uintptr_t a1) {
     }
 
     uintptr_t board = a1;                        // Board 对象基址
-    bool highView = get_view_angle_state();      // 当前视角状态（双架构共享）
+    bool highView = view_angle_state_high();      // 当前视角状态（双架构共享）
     long ret;
     AlignResult ar = ALIGN_OK;
 
@@ -2955,7 +1927,7 @@ static void applyHooks() {
         return;
     }
     log_write("applyHooks: base = 0x%lx (dl_iterate_phdr)", current_base());
-    LZT_DEBUG_ONLY(dump_lib_mappings("libPVZ2.so"));
+    LZT_DBG_ONLY(dump_lib_mappings("libPVZ2.so"));
 
     g_hookBoardZoom2 = (void*)hkBoardZoom2;
     g_hookBoardZoom  = (void*)hkBoardZoom;
@@ -2969,7 +1941,7 @@ static void applyHooks() {
     install_always_hooks();
 
     // BoardZoom2（强制 scale）：由视角状态决定挂载/卸载
-    sync_view_hooks();
+    view_angle_sync_hooks();
 
     // 功能 Hook：方向表起点修正（Debug 模式额外打印 selector 与输出值）
     if (oA23A8C == nullptr) {
@@ -2990,7 +1962,7 @@ static void applyHooks() {
     }
 
     // 纯诊断 Hook：正式版不安装，避免每帧坐标/相机路径开销。
-    if constexpr (lawn_zoom_tab::kDebugMode) {
+    if constexpr (lzt_config::kDebugMode) {
         if (oAEF69C == nullptr) {
             A64HookFunction(
                 reinterpret_cast<void*>(g_base + OFF_AEF69C),
@@ -3040,46 +2012,9 @@ static void applyHooks() {
         log_write("StreetDinos(729638) hook installed: o=%p", (void*)oStreetDinos);
     }
 
-    if (g_settings_hook_base != g_base || !g_settings_create_hooked ||
-        !g_settings_dispatch_hooked || !g_settings_page_hooked) {
-        pSettingsStringCreate = reinterpret_cast<SettingsStringCreate_t>(g_base + OFF_SettingsStringCreate);
-        pSettingsTitleStringCreate = reinterpret_cast<SettingsStringCreate_t>(g_base + OFF_SettingsTitleStringCreate);
-        pSettingsIconLoad = reinterpret_cast<SettingsIconLoad_t>(g_base + OFF_SettingsIconLoad);
-        pSettingsAttachTab = reinterpret_cast<SettingsAttachTab_t>(g_base + OFF_SettingsAttach);
-        pSettingsLayout = reinterpret_cast<SettingsLayout_t>(g_base + OFF_SettingsLayout);
-        pSettingsContentCreate = reinterpret_cast<SettingsContentCreate_t>(g_base + OFF_SettingsContentCreate);
-        pSettingsScaleFloat = reinterpret_cast<SettingsScaleFloat_t>(g_base + OFF_SettingsScaleFloat);
-        pCheckboxCreate = reinterpret_cast<CheckboxCreate_t>(g_base + OFF_CheckboxCreate);
-        pSettingsAddWidget = reinterpret_cast<SettingsAddWidget_t>(g_base + OFF_SettingsAddWidget);
-
-        oSettingsCreateTab = nullptr;
-        oSettingsDispatch = nullptr;
-        oSettingsCreatePage = nullptr;
-        A64HookFunction(
-            reinterpret_cast<void*>(g_base + OFF_SettingsCreate),
-            reinterpret_cast<void*>(hkSettingsCreateTab),
-            reinterpret_cast<void**>(&oSettingsCreateTab));
-        A64HookFunction(
-            reinterpret_cast<void*>(g_base + OFF_SettingsDispatch),
-            reinterpret_cast<void*>(hkSettingsDispatch),
-            reinterpret_cast<void**>(&oSettingsDispatch));
-        A64HookFunction(
-            reinterpret_cast<void*>(g_base + OFF_SettingsDataSharing),
-            reinterpret_cast<void*>(hkSettingsCreatePage),
-            reinterpret_cast<void**>(&oSettingsCreatePage));
-        g_settings_create_hooked = oSettingsCreateTab != nullptr;
-        g_settings_dispatch_hooked = oSettingsDispatch != nullptr;
-        g_settings_page_hooked = oSettingsCreatePage != nullptr;
-        if (g_settings_create_hooked && g_settings_dispatch_hooked && g_settings_page_hooked) {
-            g_settings_hook_base = g_base;
-            g_inserting_view_angle_tab = false;
-            log_write("Settings shell hooks installed: create=+0x%lx dispatch=+0x%lx page=+0x%lx tab_id=%u",
-                      OFF_SettingsCreate, OFF_SettingsDispatch, OFF_SettingsDataSharing, SETTINGS_VIEW_ANGLE_ID);
-        } else {
-            log_write("Settings shell hooks incomplete: create=%d dispatch=%d page=%d, retry allowed",
-                      g_settings_create_hooked, g_settings_dispatch_hooked, g_settings_page_hooked);
-        }
-    }
+    // Settings UI：由 lzt_settings 框架引擎接管（hook 三件套安装、
+    // ID 分配、事件路由、页面构建）。模块注册在 constructor 中完成。
+    lzt_settings::engine_install();
 
     // dp 初始化第一重（保留但不再参与判定）
     init_dp();
@@ -3267,14 +2202,7 @@ static uint8_t g_trampoline_a23[64]  __attribute__((aligned(32)));
 static uint8_t g_trampoline_c18[64]  __attribute__((aligned(32)));
 static uint8_t g_trampoline_dino[64] __attribute__((aligned(32)));
 static uint8_t g_trampoline_shk[64]  __attribute__((aligned(32)));
-// v32：Settings UI hook trampoline（createTab / dispatch / DataSharing 页面重建）
-// 三个目标前 12 字节均已 IDA 验证为 3×4 字节 ARM 指令，无 PC 相对：
-//   0x6D3068: PUSH {R4-R11,LR}; ADD R11,SP,#0x1C; SUB SP,SP,#4
-//   0x6D5BE8: PUSH {R4-R7,R11,LR}; ADD R11,SP,#0x10; SUB SP,SP,#0x40
-//   0x6D4420: PUSH {R4-R11,LR}; ADD R11,SP,#0x1C; SUB SP,SP,#4
-static uint8_t g_trampoline_set_cr[64] __attribute__((aligned(32)));
-static uint8_t g_trampoline_set_di[64] __attribute__((aligned(32)));
-static uint8_t g_trampoline_set_pg[64] __attribute__((aligned(32)));
+// （v32 Settings UI trampoline 已随框架迁移删除；引擎使用自己的缓冲）
 
 // 修改内存权限为可读可写可执行（hook 需要写入代码段）
 static bool make_writable(uintptr_t addr, size_t size) {
@@ -3430,7 +2358,7 @@ static void applyHooks() {
         return;
     }
     log_write("applyHooks: base = 0x%lx (dl_iterate_phdr)", current_base());
-    LZT_DEBUG_ONLY(dump_lib_mappings("libPVZ2.so"));
+    LZT_DBG_ONLY(dump_lib_mappings("libPVZ2.so"));
 
     g_hookBoardZoom2 = (void*)hkBoardZoom2;
     g_hookBoardZoom  = (void*)hkBoardZoom;
@@ -3452,7 +2380,7 @@ static void applyHooks() {
     verify_arm_patch(target_z1, "BoardZoom");
 
     // Hook 0: BoardZoom2（强制 board[280]=1.0）——由视角状态决定挂载/卸载
-    sync_view_hooks();
+    view_angle_sync_hooks();
     if (g_view_hooks_enabled.load(std::memory_order_acquire)) {
         verify_arm_patch(g_base + OFF_BoardZoom2, "BoardZoom2");
     }
@@ -3504,47 +2432,9 @@ static void applyHooks() {
 
     if (!oBoardZoom)  log_write("WARNING: BoardZoom hook failed!");
 
-    // v32：Settings 视角切换 UI hook（createTab / dispatch / dirty 重建）
-    if (g_settings_hook_base != g_base || !g_settings_create_hooked ||
-        !g_settings_dispatch_hooked || !g_settings_page_hooked) {
-        pSettingsStringCreate = reinterpret_cast<SettingsStringCreate_t>(g_base + OFF_SettingsStringCreate);
-        pSettingsTitleStringCreate = reinterpret_cast<SettingsStringCreate_t>(g_base + OFF_SettingsTitleStringCreate);
-        pSettingsIconLoad = reinterpret_cast<SettingsIconLoad_t>(g_base + OFF_SettingsIconLoad);
-        pSettingsAttachTab = reinterpret_cast<SettingsAttachTab_t>(g_base + OFF_SettingsAttach);
-        pSettingsLayout = reinterpret_cast<SettingsLayout_t>(g_base + OFF_SettingsLayout);
-        pSettingsContentCreate = reinterpret_cast<SettingsContentCreate_t>(g_base + OFF_SettingsContentCreate);
-        pSettingsScaleFloat = reinterpret_cast<SettingsScaleFloat_t>(g_base + OFF_SettingsScaleFloat);
-        pCheckboxCreate = reinterpret_cast<CheckboxCreate_t>(g_base + OFF_CheckboxCreate);
-        pSettingsAddWidget = reinterpret_cast<SettingsAddWidget_t>(g_base + OFF_SettingsAddWidget);
-
-        oSettingsCreateTab = nullptr;
-        oSettingsDispatch = nullptr;
-        oSettingsCreatePage = nullptr;
-        uintptr_t t_cr = g_base + OFF_SettingsCreate;
-        uintptr_t t_di = g_base + OFF_SettingsDispatch;
-        uintptr_t t_pg = g_base + OFF_SettingsDataSharing;
-        bool ok_cr = arm_inline_hook(t_cr, (void*)hkSettingsCreateTab,
-                                       (void**)&oSettingsCreateTab, g_trampoline_set_cr);
-        bool ok_di = arm_inline_hook(t_di, (void*)hkSettingsDispatch,
-                                       (void**)&oSettingsDispatch, g_trampoline_set_di);
-        bool ok_pg = arm_inline_hook(t_pg, (void*)hkSettingsCreatePage,
-                                       (void**)&oSettingsCreatePage, g_trampoline_set_pg);
-        g_settings_create_hooked = ok_cr && oSettingsCreateTab != nullptr;
-        g_settings_dispatch_hooked = ok_di && oSettingsDispatch != nullptr;
-        g_settings_page_hooked = ok_pg && oSettingsCreatePage != nullptr;
-        if (g_settings_create_hooked) verify_arm_patch(t_cr, "SettingsCreateTab");
-        if (g_settings_dispatch_hooked) verify_arm_patch(t_di, "SettingsDispatch");
-        if (g_settings_page_hooked) verify_arm_patch(t_pg, "SettingsDataSharing");
-        if (g_settings_create_hooked && g_settings_dispatch_hooked && g_settings_page_hooked) {
-            g_settings_hook_base = g_base;
-            g_inserting_view_angle_tab = false;
-            log_write("Settings shell hooks installed: create=+0x%lx dispatch=+0x%lx page=+0x%lx tab_id=%u",
-                      OFF_SettingsCreate, OFF_SettingsDispatch, OFF_SettingsDataSharing, SETTINGS_VIEW_ANGLE_ID);
-        } else {
-            log_write("Settings shell hooks incomplete: create=%d dispatch=%d page=%d, retry allowed",
-                      g_settings_create_hooked, g_settings_dispatch_hooked, g_settings_page_hooked);
-        }
-    }
+    // v32→v48：Settings UI 由 lzt_settings 框架引擎接管（hook 三件套、
+    // ID 分配、事件路由、页面构建）。模块注册在 constructor 中完成。
+    lzt_settings::engine_install();
 
     // dp 初始化第一重（保留但不再参与判定）
     init_dp();
@@ -3759,51 +2649,58 @@ static std::mutex g_snapshot_mutex;
 
 #endif // __arm__
 
+// 视角 hook 同步（sync_view_hooks）与同步重试线程已迁移至
+// view_angle_module.cpp；本文件仅保留 lzt_view_hooks_set_enabled 门面。
+
 // ============================================================
-// 视角 hook 同步（双架构共享）
+// lzt_hooks::install — 双架构 hook 安装门面
 //
-// install_view_hooks/uninstall_view_hooks 在各自架构段定义、签名一致，
-// 此处按视角状态分发：
-//   高视角 → 挂载 BoardZoom2（强制 board[280]=1.0）
-//   低视角 → 卸载 BoardZoom2（恢复原版低视角 scale 计算）
+// 为次级模块（Settings UI 框架引擎等）提供统一的 inline hook
+// 安装入口，复用本文件经过真机验证的架构机制：
+//   ARM64: A64HookFunction（And64InlineHook，trampoline 库内管理）
+//   ARM32: arm_inline_hook（12 字节 ARM patch + 调用方 trampoline）
+// 存活保障与历史行为一致：基址变化由主模块监控线程经 applyHooks
+// 重装路径覆盖；调用方应在 applyHooks 之后幂等调用安装。
 // ============================================================
-static void sync_view_hooks() {
-    bool highView = get_view_angle_state();
-    if (highView) {
+bool lzt_hooks_install(uintptr_t target, void* hook_fn, void** orig_out,
+                       uint8_t* trampoline_buf) {
+#ifdef __aarch64__
+    (void)trampoline_buf;
+    if (g_base == 0 || orig_out == nullptr) return false;
+    void* orig = nullptr;
+    A64HookFunction(reinterpret_cast<void*>(target), hook_fn, &orig);
+    *orig_out = orig;
+    return orig != nullptr;
+#else
+    if (g_base == 0 || trampoline_buf == nullptr) return false;
+    return arm_inline_hook(target, hook_fn, orig_out, trampoline_buf);
+#endif
+}
+
+namespace lzt_hooks {
+bool install(uintptr_t target, void* hook_fn, void** orig_out,
+             uint8_t* trampoline_buf) {
+    return lzt_hooks_install(target, hook_fn, orig_out, trampoline_buf);
+}
+} // namespace lzt_hooks
+
+// ---- 视角 hook 挂载门面（供 view_angle 模块联动调用）----
+// 业务归模块，机制在此：高视角挂 BoardZoom2（强制 scale=1.0），
+// 低视角卸载恢复原版。install/uninstall_view_hooks 为各架构段实现。
+bool lzt_view_hooks_set_enabled(bool enable) {
+    if (enable) {
         install_view_hooks();
     } else {
         uninstall_view_hooks();
     }
-    log_write("sync_view_hooks: highView=%d enabled=%d", highView,
-              g_view_hooks_enabled.load(std::memory_order_acquire) ? 1 : 0);
-}
-
-// ---- 视角 hook 同步重试线程（双架构共享）----
-// applyHooks 时配置对象（g_DisplayInfo）可能未就绪，get_view_angle_state 会返回
-// 默认高视角并挂载 hook。若用户此前设置过低视角，需要在配置就绪后重新同步，
-// 卸载高视角 hook。
-static void start_view_hook_sync_retry() {
-    std::thread([]() {
-        for (int i = 0; i < 60; ++i) {
-            if (i > 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            }
-            uintptr_t cfg = *(uintptr_t*)(g_base + OFF_G_DisplayInfo);
-            if (!cfg) continue;  // 配置对象还没就绪，继续等待
-            // 配置对象就绪，重新同步 hook 状态
-            log_write("View hook sync: config object ready, syncing view hooks");
-            sync_view_hooks();
-            return;
-        }
-        log_write("View hook sync: timeout waiting for config object");
-    }).detach();
+    return true;
 }
 
 // ============================================================
 // 入口
 //
-// __attribute__((constructor)) 使本函数在 libLawnZoomTab.so 加载时自动执行
-// 执行时机：System.loadLibrary("LawnZoomTab") 调用时
+// __attribute__((constructor)) 使本函数在 libsettingsframework.so 加载时自动执行
+// 执行时机：System.loadLibrary("settingsframework") 调用时
 //
 // 为什么用独立线程等待 libPVZ2.so：
 //   本 so 加载时 libPVZ2.so 可能尚未加载（加载顺序不可控），
@@ -3818,9 +2715,9 @@ static void start_view_hook_sync_retry() {
 //   5. start_patch_monitor() — 启动 patch 存活监控线程
 // ============================================================
 
-__attribute__((constructor)) void LawnZoomTab_init() {
+__attribute__((constructor)) void settingsframework_init() {
     log_init();
-    install_crash_diagnostics();
+    lzt_core::install_crash_diagnostics();
     log_write("constructor start, spawning hook thread");
 
     std::thread([]() {
@@ -3839,8 +2736,13 @@ __attribute__((constructor)) void LawnZoomTab_init() {
 
         // 安装两个 hook（BoardZoom2 + BoardZoom）
         // applyHooks 内部用 get_lib_base_stable 获取稳定基址
-        log_write("BUILD v47-DEBUG-SNAPSHOT-HARDENING mode=%s debug=%d; v44 direction-start fix and all functional hooks retained",
-                  lawn_zoom_tab::kBuildMode, lawn_zoom_tab::kDebugMode ? 1 : 0);
+        log_write("BUILD v48-SETTINGS-FRAMEWORK mode=%s debug=%d; Settings UI migrated to lzt_settings framework",
+                  lzt_config::kBuildMode, lzt_config::kDebugMode ? 1 : 0);
+        // 框架模块注册（纯入表；须在 engine_install 之前完成）。
+        // 注册顺序决定动态 id 分配顺序：language=30，view_angle=33。
+        language_module_init();
+        view_angle_module_init();
+        screen_bindings_init();   // v7.37：屏幕本地化绑定（注册刷新器与引擎就绪回调）
         applyHooks();
         log_write("libPVZ2.so base = 0x%lx", current_base());
         log_write("hooks applied");
@@ -3856,12 +2758,11 @@ __attribute__((constructor)) void LawnZoomTab_init() {
         // 策略：前 30 秒高频检查（100ms），之后低频监控（1s）
         start_patch_monitor();
 
-        // 启动视角 hook 同步重试线程（配置就绪后按视角状态挂载/卸载高视角 hook）
-        start_view_hook_sync_retry();
+        // 视角 hook 同步重试已随 view_angle 模块迁移（模块 init 时自行启动）
 
 #ifndef __aarch64__
         // ARM32 快照诊断线程（v32.1：替代未定位的 CameraUpdate/AEF69C 函数级诊断）
-        if constexpr (lawn_zoom_tab::kDebugMode) {
+        if constexpr (lzt_config::kDebugMode) {
             start_board_snapshot_monitor();
         }
 #endif
