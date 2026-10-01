@@ -21,7 +21,8 @@ LOCAL_SRC_FILES := lzt_settings_framework.cpp \
     settings/settings_widgets.cpp \
     settings/localizer.cpp \
     settings/table_loader.cpp \
-    settings/game_abi.cpp
+    settings/game_abi.cpp \
+    components/component_patches.cpp
 
 ifeq ($(TARGET_ARCH),arm64)
     LOCAL_SRC_FILES += And64InlineHook.cpp resource_file_arm64.S

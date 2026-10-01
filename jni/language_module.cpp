@@ -9,6 +9,7 @@
 //   （settings/table_loader.h）承担，模块侧只提供 fetch / parse 回调：
 //     ① CDN LANGUAGETYPES.rton —— AsciiORM 二进制（language_types_rton.cpp）
 //     ② CDN LANGUAGETYPES.json —— 严格最小解析器（language_types.cpp）
+//        受编译开关 kEnableFastReadChannel 控制，默认关闭（不入来源表）
 //     ③ 数据包 packages\LANGUAGETYPES.rton —— 游戏 RSB 名查找
 //        （read_bytes_from_package；仅 ARM64）
 //   parse 统一产出 ParseResult：LocalizedName→checkbox 键名、
@@ -51,7 +52,7 @@
 
 #include "language_module.h"
 
-#include "lzt_settings_framework_config.h"   // v7.34：kEnableEmptyLangPageFallback
+#include "lzt_settings_framework_config.h"   // kEnableEmptyLangPageFallback / kEnableFastReadChannel
 #include "settings/settings_framework.h"
 #include "lzt_core.h"
 #include "offsets.h"
@@ -331,9 +332,15 @@ bool fetch_package_rton(std::string& out) {
 }
 
 // 来源优先级表 + 加载器实例（外置文件优先，内置兜底；失败节流 3 秒）
-const lzt_settings::TableSource kLangSources[] = {
+//   "cdn-json" 受编译开关 kEnableFastReadChannel 控制：关闭（默认）时该
+//   来源不入表——Debug/Release 均不读取 CDN LANGUAGETYPES.json。
+[[maybe_unused]] const lzt_settings::TableSource kLangSourcesWithJson[] = {
     {"cdn-rton",     fetch_cdn_rton,     parse_lang_rton},
     {"cdn-json",     fetch_cdn_json,     parse_lang_json},
+    {"package-rton", fetch_package_rton, parse_lang_package},
+};
+[[maybe_unused]] const lzt_settings::TableSource kLangSourcesNoJson[] = {
+    {"cdn-rton",     fetch_cdn_rton,     parse_lang_rton},
     {"package-rton", fetch_package_rton, parse_lang_package},
 };
 // 加载器以“函数内静态”持有：全局对象与 __attribute__((constructor)) 同处
@@ -341,8 +348,13 @@ const lzt_settings::TableSource kLangSources[] = {
 // 会读到尚未构造的空加载器（来源数=0，构造期加载静默失效）。函数内静态
 // 在首次调用时才构造（C++11 起线程安全），彻底消除顺序依赖。
 lzt_settings::TableLoader& lang_loader() {
-    static lzt_settings::TableLoader loader(kLangSources, 3);
-    return loader;
+    if constexpr (lzt_config::kEnableFastReadChannel) {
+        static lzt_settings::TableLoader loader(kLangSourcesWithJson, 3);
+        return loader;
+    } else {
+        static lzt_settings::TableLoader loader(kLangSourcesNoJson, 2);
+        return loader;
+    }
 }
 
 // 语言表加载入口：节流/重测由 TableLoader 承担；此处仅在首次成功后补打
@@ -1339,7 +1351,7 @@ static void start_locale_switch_thread() {
 // 可区分“so 未加载”与“libPVZ2.so hook 未生效”两类故障。
 __attribute__((constructor)) void language_locale_bootstrap() {
     lzt_core::log_write("Language module bootstrap: build=%s mode=%s",
-                        "LANGUAGE-V7.36-MODULE-TIDY", lzt_config::kBuildMode);
+                        "LANGUAGE-V2.1.0-MODULE-TIDY", lzt_config::kBuildMode);
     lang_table_ensure();
     start_locale_switch_thread();
 }

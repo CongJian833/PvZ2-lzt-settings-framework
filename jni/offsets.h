@@ -310,6 +310,34 @@ constexpr uintptr_t OFF_C187C                  = 0x6C187C; // sub_6C187C MoveBoa
 constexpr uintptr_t OFF_AEF69C                 = 0xAEF69C; // sub_AEF69C 渲染坐标转换(Board,{x,y,w,h}) 乘法型 screenX=b281+scale*(worldXpx-b281+b17) 诊断用
 constexpr uintptr_t OFF_G_UIScaleContext       = 0x26D0B58;// g_UIScaleContext 指针全局
 constexpr uintptr_t UISCALE_VALUE              = 2432;     // 0x980 UIScale(float) 值偏移（g_UIScaleContext 对象内）
+// --- News 页本地化（自定义语言短码兜底，见 screen_bindings.cpp）---
+//   News 取键链：sub_A50A28(News页) → sub_98A694(FourCC→两字母 key，白名单
+//   en/de/fr/it/pt/es) → sub_145B760(表 "NewsData") → sub_145BE84(entry,key)
+//   → sub_145CAC0(红黑树严格 memcmp 查 LocalizedData[key]，未命中→空)。
+//   自定义语言不在白名单 → 空 key → 空白；故 hook sub_145BE84 做第一段后缀兜底。
+constexpr uintptr_t OFF_NEWS_SELECT_LOCALE     = 0x145BE84; // sub_145BE84(entry, key)：取 LocalizedData[key]
+
+// --- 组件补丁：EAText 字形缓存 / 图鉴（见 components/README.md）---
+//   一、字形缓存尺寸：sub_1713384 按屏幕最小边选 512/1024/2048（CMP #0x401/#0x281），
+//       经 sub_17F3560(cache,a2,a3,a4) 构造，a4 写入 cache+0xA4。强制 a4=2048 即可。
+//   二、图鉴翻页：小图鉴条目切换入口 sub_869258（AlmanacObjectChooser::Select，
+//       a2=目标条目索引，内部重建选择项并播放 "Play_UI_Menu_Tab_Scroll"/"SelectItem"）。
+//       字形缓存「清+重建」组合（对齐 iOS ClearPrimeGlyphCache + rebuild）：
+//         EAText 全局 g = sub_1713288()；cache = *(g+8)（PrimeGlyphCache）
+//         清  = sub_1714090(g) = sub_17F3DF4(cache)  —— 销毁 image render data
+//         重建 = sub_1714098(g) = sub_17F3E70(cache) —— 重新构建渲染数据
+//       二者即引擎自身 sub_153DEB4 重置字形缓存时成对调用的序列（153dec4/153def8）。
+//       根因证据：sub_1712664（PrimeGlyphMesh::BuildPart）告警
+//         "...There is no place to put this glyph into the glyph cache.
+//          You should clear the cache before building the parts."
+constexpr uintptr_t OFF_GLYPH_CACHE_CTOR       = 0x17F3560; // sub_17F3560(cache, a2, a3, size)：写入 cache+0xA4
+constexpr uintptr_t OFF_GLYPH_CACHE_SIZE_SEL   = 0x1713384; // sub_1713384：屏幕最小边→512/1024/2048
+constexpr uintptr_t OFF_EATEXT_GLOBAL_GET      = 0x1713288; // sub_1713288()：返回 EAText 全局指针（+8 = 字形缓存实例）
+constexpr uintptr_t OFF_GLYPH_CACHE_DESTROY    = 0x17F3DF4; // sub_17F3DF4(cache)：PrimeGlyphCache::Destroying image render data（被 CLEAR 包裹）
+constexpr uintptr_t OFF_GLYPH_CACHE_CLEAR      = 0x1714090; // sub_1714090(g)：= sub_17F3DF4(*(g+8)) 清字形渲染数据
+constexpr uintptr_t OFF_GLYPH_CACHE_REBUILD    = 0x1714098; // sub_1714098(g)：= sub_17F3E70(*(g+8)) 重建字形渲染数据
+constexpr uintptr_t OFF_ALMANAC_WIDGET_DEPRESS = 0x86EC40;  // sub_86EC40：AlmanacWidget::ButtonDepress（a2: 0=植物/1=僵尸/2=升级）
+constexpr uintptr_t OFF_ALMANAC_CHOOSER_SELECT = 0x869258;  // sub_869258：AlmanacObjectChooser::Select（a2=目标条目索引）小图鉴翻页/切换
 
 // --- 低视角相机系统（调查用）---
 // 相机定位公式（sub_7EAD24/sub_7F45C4）：

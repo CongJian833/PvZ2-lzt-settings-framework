@@ -17,6 +17,28 @@ inline constexpr const char* kBuildMode = kDebugMode ? "DEBUG" : "RELEASE";
 //          不创建"语言"Tab（不进入后续流程）。
 //   true ：始终创建语言 Tab；无来源时保留空白页（旧行为）。
 inline constexpr bool kEnableEmptyLangPageFallback = false;
+
+// 快速读取通道开关（LANGUAGETYPES 来源中的 "CDN-json" 方式）。默认关闭。
+//   false：来源表不含 CDN LANGUAGETYPES.json——Debug/Release 均不读取；
+//   true ：纳入 CDN LANGUAGETYPES.json（明文 JSON 直投，开发期快速调试用）。
+// 与 kDebugMode 相互独立：Debug 版不会自动开启本通道。
+inline constexpr bool kEnableFastReadChannel = false;
+
+// News 本地化短码兜底开关（见 screen_bindings.cpp「News 页本地化」）。
+//   引擎把当前语言 FourCC 映射为两字母 key（en/de/fr/it/pt/es）；自定义语言
+//   （如 zh-cn）不在其白名单 → 返回空 key → News 的 LocalizedData 查空键 → 空白。
+//   本开关开启后，在 News 取键函数入口做兜底：空 key 时改写为 locale 第一段
+//   后缀（zh-cn → zh），使 News 能对上自定义语言的 LocalizedData 条目。
+inline constexpr bool kEnableNewsLocalization = true;
+
+// --- 组件补丁开关（见 jni/components/README.md）---
+// 一、强制所有设备字形渲染缓存为 2048：引擎按屏幕最小边选 512/1024/2048，
+//     小屏落入 512/1024 导致字符缺失；开启后统一为 2048。
+inline constexpr bool kEnableGlyphCacheSize2048 = true;
+// 二、图鉴（Almanac）翻页时主动刷新字形缓存：翻页复用上一页脏缓存导致字符异常；
+//     开启后在翻页入口（AlmanacObjectChooser::Select / AlmanacWidget::ButtonDepress）
+//     前置调用字形缓存「清 + 重建」（对齐 iOS ClearPrimeGlyphCache + rebuild）。
+inline constexpr bool kEnableAlmanacGlyphFlush = true;
 }
 
 // ============================================================
