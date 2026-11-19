@@ -1,0 +1,79 @@
+# ============================================================
+# .gitignore —— Android / iOS 双端同步用
+#
+# 设计原则：
+#   1. 源码、文档、测试、构建脚本全部跟踪 —— 两端需要共享
+#   2. 只忽略「可再生成」的产物与「版权敏感」的游戏文件
+#   3. 平台专属目录不特殊处理 —— 双方从不交叉修改，天然无冲突
+#
+# 与旧版（仅发布源码）的区别：
+#   · tests/ 与 build_variants.py 改为跟踪（测试要两端一致）
+#   · dist/ 改为跟踪（产物便于对方核对，体积小）
+#   · iOS/docs/ 改为跟踪（技术文档需要共享）
+# ============================================================
+
+# ---- 构建产物（可再生成）----
+jni/libs/
+jni/obj/
+libs/
+obj/
+iOS/build/
+*.o
+*.a
+build_log.txt
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+
+# ---- 打包输出 ----
+out/
+/安装包/
+*.apk
+*.ipa
+
+# ---- IDE / 编辑器 ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+desktop.ini
+Thumbs.db
+.DS_Store
+
+# ---- 敏感文件（绝不入库）----
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+iOS/entitlements.plist
+
+# ---- 游戏原始文件（版权敏感）----
+libPVZ2.so
+*.i64
+*.idb
+*.so.bak
+
+# ---- 大体积备份（本地保留，不入库）----
+iOS/backup/
+iOS/docs/LawnStrings-*.json
+
+# ---- 临时 ----
+*.log
+*.tmp
+.repack-*
+
+# ---- 编译产物（有 .c 源码，二进制不入库）----
+iOS/tools/daveconv
+iOS/tools/lztgate
+iOS/tools/ldcmd_add
+iOS/tools/ptrfind
+iOS/tools/wfind
+iOS/tools/xref
+iOS/tools/xref2
+
+# ---- 备份文件 ----
+*.bak
+tests/.pre-*

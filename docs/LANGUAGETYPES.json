@@ -1,0 +1,33 @@
+{
+	"#comment": "Make new languages here!",
+	"version": 1,
+	"objects": [
+		{
+			"objclass": "LanguageType",
+			"objdata": {
+				"TypeName": "language_english",
+				"LocalizedName": "[LANGUAGE_ENGLISH]",
+				"LawnStringsType":"en-us",
+				"Enabled": true
+			}
+		},
+		{
+			"objclass": "LanguageType",
+			"objdata": {
+				"TypeName": "language_simplified_chinese",
+				"LocalizedName": "[LANGUAGE_SIMPLIFIED_CHINESE]",
+				"LawnStringsType":"zh-cn",				
+				"Enabled": true
+			}
+		},
+		{
+			"objclass": "LanguageType",
+			"objdata": {
+				"TypeName": "language_french",
+				"LocalizedName": "[LANGUAGE_FRENCH]",
+				"LawnStringsType":"fr-fr",				
+				"Enabled": true
+			}
+		}
+	]
+}
