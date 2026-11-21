@@ -1,8 +1,8 @@
 # Git 同步工作流（Windows 侧）
 
 > 脚本：`tools/git_sync.py`
-> 适用：本机 Windows 环境，分支 `baseline`
-> 建立时间：2026-11-21
+> 适用：Windows 侧开发环境，工作分支 `baseline`
+> 本文档只写稳定的操作方式，不记录具体提交号——那些会随开发推进过期。
 
 ---
 
@@ -26,13 +26,15 @@
 **只有一个工作分支：`baseline`**
 
 ```
-origin/main       f4a7a6b   历史遗留，不参与双端同步（勿动）
-origin/baseline   b7fdfbd   唯一工作分支，Android + iOS 共用
+origin/main      历史遗留，不参与双端同步（勿动）
+origin/baseline  唯一工作分支，Android + iOS 共用
 ```
 
-沿革：原为 `sync/android-baseline` 与 `ios/baseline` 两条并行分支，
-2026-11-21 合并后删除 iOS 侧，并把名字从 `sync/android-baseline` 改为
-`baseline`（原名已名不副实，易误解为仅 Android）。
+当前提交号用 `python tools/git_sync.py status` 查看，不要写进文档。
+
+沿革：早期 Android 与 iOS 曾在两条并行分支（`sync/android-baseline`、
+`ios/baseline`）上开发，合并后统一为 `baseline`——原名含 `android`
+容易误解为仅适用 Android。
 
 ---
 
@@ -86,8 +88,8 @@ python tools/git_sync.py status
 分支: baseline
 
 === 提交 ===
-  095793a docs: add dual-platform sync workflow for iOS handoff
-  91c053c chore: establish dual-platform sync baseline (...)
+  abc1234 docs: 最近的提交说明
+  def5678 chore: 更早的提交说明
 
 === 工作区 ===
   干净，无未提交改动
