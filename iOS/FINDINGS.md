@@ -136,7 +136,7 @@ Android 侧 `offsets.h` 记录的 Board 字段是**int 数组下标**（如 `boa
 
 ## 九、设置页（Settings）定位——已完全解决
 
-突破来自参考文档 `docs/VIEW_ANGLE_代码分析.md`（同为 iOS 9.8.1），
+突破来自同版本的视角分析资料（同为 iOS 9.8.1），
 并由本项目运行时挂钩逐条验证通过。
 
 ### 关键谜团解开：键字符串是 UTF-32LE
@@ -657,9 +657,9 @@ out+0x10 = libc++ cap 标志（0x8000000000000030）
 
 ## 十九、【完成】RSB 取数原语定位成功 —— LANGUAGETYPES 数据包来源打通
 
-> 本轮为**跨平台协作的决定性突破**：iOS 侧把已确证的定位信息写成求助文档
-> （`iOS/docs/ASK_ANDROID_RSB_LOOKUP.md` v2），安卓侧给出**指令级答复**
-> （`ANSWER_ANDROID_RSB_LOOKUP.md`，基于安卓 9.8.1 arm64 完整反汇编），
+> 本轮为**跨平台协作的决定性突破**：iOS 侧把已确证的定位信息写成求助文档，
+> 安卓侧给出**指令级答复**
+> （基于安卓 9.8.1 arm64 完整反汇编），
 > 据此在 iOS 上定位成功并**真机验证通过**。
 >
 > **结论：`read_bytes_from_package` 已在 iOS 实现，实测读出真 RTON；
@@ -1155,4 +1155,4 @@ round3 proc=1 crash=0 prewarmHit=1 pkgSrc=2
 - 回退：图鉴 Update `0x3c44a8` 时间节流（hook 正常时 5s，异常时 1.5s）
 - 实测：植物图鉴全量 + 僵尸图鉴全覆盖，无缺字
 
-完整记录见 **`docs/GLYPH_CACHE_FIX.md`**。
+完整记录见 `iOS/backup/` 下对应版本的归档。

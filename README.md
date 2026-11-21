@@ -74,6 +74,9 @@ constexpr uintptr_t OFF_SettingsCreate = 0xA4D79C;
 当前配置对应国际版 9.8.1。换版本时只需重新核对这一个文件；实现代码中不允许
 出现裸地址字面量。
 
+偏移表的分类说明与「怎么定位一个新地址」见
+[docs/offsets-guide.md](docs/offsets-guide.md)。
+
 ### 2. 编译
 
 需要 Android NDK（r26b 或更新）。
@@ -365,7 +368,7 @@ PvZ2-lzt-settings-framework/
 │   ├── components/                      # 组件补丁层
 │   └── And64InlineHook.cpp / .hpp       # 上游 inline hook 库（MIT）
 ├── iOS/                                 # iOS 侧：构建、打包、平台实现
-├── docs/                                # 偏移量指南、语言表模板
+├── docs/                                # 偏移量指南、日志系统说明、语言表模板
 ├── tests/                               # 静态检查脚本
 ├── tools/repack.py                      # APK 重打包工具
 ├── build_variants.py                    # 双版本构建脚本
@@ -391,6 +394,9 @@ armeabi-v7a 上的目标函数为 ARM 模式，函数地址需为偶数，由 `B
 ---
 
 ## 十、日志与排查
+
+日志系统的完整说明（两端输出通道、日志种类、崩溃记录、排查对照表）见
+[docs/日志系统.md](docs/日志系统.md)。本节只讲 Android 侧。
 
 运行日志同时输出到 logcat（tag `settingsframework`）和本地文件：
 

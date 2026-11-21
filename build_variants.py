@@ -43,12 +43,9 @@ FLAGS_FILE = PROJECT / "feature_flags.conf"
 
 # 功能开关配置项 → 编译期常量映射；键顺序即构建日志与应用的顺序。
 # 新增可开关功能时：在 feature_flags.conf 增加一行，并在此登记对应常量。
-# 注意（workspace-lzt 适配）：本表必须与**本工程**的 feature_flags.conf 和
-# jni/lzt_settings_framework_config.h 严格对应。本工作区的源码快照只实现了
-# 5 个功能开关（jni/components/component_patches.cpp 只注册 2 个补丁：
-# glyph cache size + almanac flush），没有 lookup_empty_guard / 
-# kEnableLookupEmptyGuard。若照搬带 6 个开关的版本，read_feature_flags() 会直接
-# SystemExit（缺少开关），且 build_variants.py 会去改写一个不存在的常量。
+# 注意：本表必须与**本工程**的 feature_flags.conf 和
+# jni/lzt_settings_framework_config.h 严格对应。两者任缺一个开关，
+# read_feature_flags() 都会直接报错退出——宁可报错，也不静默漏配。
 FEATURE_SWITCHES: dict[str, str] = {
     "glyph_cache_size": "kEnableGlyphCacheSize2048",
     "glyph_cache_flush": "kEnableAlmanacGlyphFlush",

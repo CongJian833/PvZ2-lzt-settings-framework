@@ -5422,7 +5422,7 @@ static void lzt_ios_prewarm_language_table_async(void) {
 // 本探针 dump iOS rsm 头部 256 字节，逐项与安卓语义比对。
 // 【诊断】挂载组内文件表 dump
 //
-// 上轮已确证（MMAPDUMP，见 ASK_ANDROID_RSB_LOOKUP.md §0）：
+// 上轮已确证（MMAPDUMP 实测）：
 //   rsbMain = *(rsm+32) = main.rsb mmap 基址（magic "1bsr" 已验）
 //   mountCnt(rsm+112) = 1648，mountArr(rsm+120) = 组表指针
 //   组步长 128 字节；组+0 = 名字（"AlwaysLoaded_1536"），组+24 = type(==3)
@@ -5490,7 +5490,7 @@ static void rsbdump_groups(void) {
 }
 // 【诊断】验证 main.rsb 的 mmap 基址 + 找 slot/挂载表
 //
-// 上轮 dump 已证实（RSMDUMP，见 ASK_ANDROID_RSB_LOOKUP.md §0）：
+// 上轮 dump 已证实（RSMDUMP 实测）：
 //   iOS rsm = *(pakMgr + 2248)   （安卓 0x858=2136，差 112 → 规律成立）
 //   rsm+032 = 0x8bce00000        ← RSB_MAIN，疑似 main.rsb 映射基址
 //   rsm+040 = 0x253000           ← main.rsb seg[0].off
@@ -6785,7 +6785,7 @@ static void wait_and_start() {
     // 自动化/调试：若容器 Documents 下存在 lzt_autolang.txt（内容为 locale），
     // 在启动若干秒后自动触发一次语言切换，用于无人值守验证切换链路。
     lzt_ios_maybe_autolang();
-    // 【诊断】RSM 结构 dump（对照安卓公式，见 ASK_ANDROID_RSB_LOOKUP.md §0）
+    // 【诊断】RSM 结构 dump（对照安卓公式）
     lzt_ios_dump_rsm_deferred();
 
     // 【帧率】安装 setFrameInterval: 钩子 —— 60fps 开关的唯一功能依赖。

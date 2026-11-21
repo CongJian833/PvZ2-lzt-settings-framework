@@ -1,11 +1,11 @@
 #!/var/jb/bin/sh
 # ============================================================
-# build.sh — iOS 侧编译脚本（方案甲：以 Android/jni 为地基）
+# build.sh — iOS 侧编译脚本（以 jni/ 共享源码为地基）
 #
 # 产物：iOS/build/liblztsettingsframework.dylib（arm64）
 #
 # 分层与 Android 严格对应，平台差异全部由本脚本与 iOS/port 垫片承担：
-#   · 共享源码：Android/jni/*（基础层接口、框架层、业务模块）——【零改动】
+#   · 共享源码：jni/*（基础层接口、框架层、业务模块）——【零改动】
 #   · 平台实现：iOS/src/*（基址、日志、内存检查、沙盒路径、屏幕、hook 门面）
 #   · 头文件垫片：iOS/port/include（android/log.h、offsets.h → offsets_ios.h）
 # ============================================================
@@ -55,7 +55,7 @@ IOS_SRC="
   $IOS_ROOT/src/lzt_fileprobe.cpp
 "
 
-echo "[1/3] 编译共享源码（Android/jni，零改动）"
+echo "[1/4] 编译共享源码（jni/，零改动）"
 OBJS=""
 for f in $SHARED_SRC; do
     o="$OUT/$(basename "$f").o"
@@ -64,7 +64,7 @@ for f in $SHARED_SRC; do
     echo "      ok $(basename "$f")"
 done
 
-echo "[2/3] 编译 iOS 平台层"
+echo "[2/4] 编译 iOS 平台层"
 for f in $IOS_SRC; do
     o="$OUT/$(basename "$f").o"
     clang++ $CFLAGS $INCLUDES -c "$f" -o "$o"
@@ -72,14 +72,14 @@ for f in $IOS_SRC; do
     echo "      ok $(basename "$f")"
 done
 
-echo "[3/3] 链接 dylib"
+echo "[3/4] 链接 dylib"
 clang++ -isysroot "$SDK" -arch arm64 -mios-version-min=$MIN_IOS -dynamiclib \
     -install_name "@executable_path/Frameworks/lib$LIBNAME.dylib" \
     -framework Foundation -framework UIKit \
     -framework QuartzCore -framework Metal -framework OpenGLES \
     -o "$OUT/lib$LIBNAME.dylib" $OBJS
 
-echo "[4/4] 签名（ldid ad-hoc；主程序重签由 inject.sh 处理）"
+echo "[4/4] 签名（ldid ad-hoc；主程序重签由 pack.sh / inject.sh 处理）"
 ldid -S "$OUT/lib$LIBNAME.dylib"
 
 ls -la "$OUT/lib$LIBNAME.dylib"

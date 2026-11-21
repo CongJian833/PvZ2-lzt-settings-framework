@@ -26,8 +26,8 @@ Android 侧的完整说明见仓库根目录 [`README.md`](../README.md)。本�
 | 注入物 | `libsettingsframework.so`（打进 APK 的 `lib/<abi>/`） | `liblztsettingsframework.dylib`（放进 `.app/Frameworks/`） |
 | Hook 方式 | 运行时 inline hook，改写代码页 | **打包期静态跳板**，运行时不改任何代码页 |
 | 交付形态 | APK | IPA |
-| 架构 | ARM64 + ARM32 | ARM64（arm64e 可用），armv7 在打包时被裁掉 |
-| 最低系统 | Android 5.0+ | iOS 11.0+ |
+| 架构 | arm64-v8a + armeabi-v7a | 仅 arm64（armv7 在打包时被裁掉） |
+| 最低系统 | Android 7.0（API 24） | iOS 11.0 |
 
 ---
 
@@ -45,6 +45,11 @@ Android 可以在运行时 `mprotect` 改写代码页。iOS 不行：即使在�
 每个被接管的函数入口只改 **4 字节**——一条 `B` 指令，跳到 gate 区。
 gate 区位于 `__TEXT` 头部 slack（load command 之后、首个 section 之前），
 不新增段、不移动任何既有数据。
+
+这个位置不是随便选的：容器类宿主（LiveContainer 等）会向主程序追加自己的
+load command，把紧贴 load command 的空白区覆盖掉。因此打包器要求 gate 区
+**与 load command 末尾至少留出 4 KB 间距**，且不得越过首个 section 起点，
+否则直接报错退出。
 
 ```text
 入口 (0x3c4c04)                 gate 区 (0x6BD0)
@@ -87,8 +92,9 @@ gate 区头部带自描述信息，便于校验与排查：
 +0x0C  u32 count    (22)
 ```
 
-打包流程会在打包完成后回读校验：magic 唯一、stride/count 正确、
+打包流程在重签之前会回读校验：magic 唯一、stride/count 正确、
 所有入口确为 `B` 指令、gate 区与 load command 保持足够间距。
+运行时还会再做一次结构自检（逐站点比对 5 条桩指令），两处都会打进日志。
 
 ---
 
@@ -220,6 +226,9 @@ sh inject.sh restore  # 从备份还原
 其中 3 个视角站点（`183b10` / `183a58` / `5eddb4`）在运行时按条件安装，
 因此日志里的实际启用数通常是 **19~20**，而非 22。
 
+这份站点表也可以看作 iOS 侧的「函数表」——每个站点是一个接入点。
+完整的地址与字段偏移说明见 [`docs/offsets-guide.md`](../docs/offsets-guide.md)。
+
 ---
 
 ## 六、双环境验证
@@ -231,7 +240,7 @@ iOS 侧的难点在于同一份产物要在两种宿主下都正确：
 | 宿主 | 第三方容器 | 正式签名 |
 | 主程序 load command 数 | 81 | 79 |
 | gate 区相对基址 | `+0x6BD0` | `+0x6BD0` |
-| 站点安装 | 19 / 跳过 7 | 19 / 跳过 7 |
+| 站点安装 | 19~20 / 跳过 7 | 19~20 / 跳过 7 |
 | 运行时改代码页 | 0 | 0 |
 | 崩溃 | 0 | 0 |
 
@@ -243,11 +252,82 @@ load command 数量的差异（79 vs 81）来自容器注入自身追加的加�
 
 ---
 
-## 七、已知限制
+## 七、日志与排查
+
+iOS 侧不写 logcat，改为 **同时** 输出到沙盒文件和系统日志：
+
+| 输出 | 位置 |
+|---|---|
+| 文件日志 | `<沙盒>/Documents/lztsettingsframework.log` |
+| 崩溃日志 | `<沙盒>/Documents/lztsettingsframework_crash.log`（追加写） |
+| 系统日志 | `os_log`，子系统 `com.scode.lztsettingsframework` |
+
+### 日志文件策略
+
+- **每次启动清空重建**：当前日志文件名固定为 `lztsettingsframework.log`，
+  启动时以 `"w"` 打开，所以**它永远只包含最近一次启动**的内容。
+- **上一次自动归档**：启动时把上一份改名成
+  `lztsettingsframework-<yyyyMMdd-HHmmss>.log`（文件名字典序即时间序）。
+- **只保留最近 5 份**：更早的归档自动删除。
+- **崩溃日志独立追加**：主日志每次启动会被截断，崩溃现场写进单独文件，
+  两者互不覆盖。
+
+> **文件名与安卓不同**：安卓是 `settingsframework.log`（与 `.so` 同名），
+> iOS 是 `lztsettingsframework.log`（与 dylib 同名）。两套命名各自保持
+> 与自身产物名一致，**跨端对照日志时不要按名字去取**。
+
+### 常用关键字
+
+| 关键字 | 含义 |
+|---|---|
+| `===== BOOT ... =====` | 每次启动的开头，带本地时间戳 |
+| `[STATIC] gate_hdr=... stride=48 count=22` | 定位到 gate 区，静态机制生效 |
+| `[STATIC] gate integrity check: all 22 sites OK` | 22 个桩结构自检通过 |
+| `[STATIC-ONLY] static sites used=19, no-site skipped=7` | 站点启用统计 |
+| `[ERROR] hook(s) without static site` | 缺站点的功能会静默失效 |
+| `[SFW]` | 设置框架日志（Tab 注册、id 分配、页面构建） |
+| `[CMP]` | 组件补丁的字节校验结果 |
+| `LangTable: source=` | 语言表来源命中结果 |
+| `LangOverride: rule2 ...` | 启动期语言标识判定分支 |
+| `Lang hot_reload: ...` | 语言热重载流程边界 |
+| `[HB] main thread STALLED` | 主线程停顿看门狗 |
+| `NATIVE_CRASH` | 崩溃信号与现场（另见崩溃日志文件） |
+
+### 排查思路
+
+| 现象 | 先看 |
+|---|---|
+| 设置页里没有新 Tab | `gate_hdr` 是否为 0；`no-site skipped` 是否远大于 7 |
+| 站点功能整体失效 | `gate integrity check` 是否报 corrupted |
+| 语言表为空 | `LangTable: source=` 是否有输出；No_Backup 重定向是否成功 |
+| 启动卡在加载图标 | 确认 dylib 是**静态模式**构建（见第四节） |
+| 崩溃 | 附上 `lztsettingsframework_crash.log`，里面有寄存器和调用栈 |
+
+### 取日志
+
+- **越狱直装（企业签名）**：日志在游戏的数据容器 `Documents` 目录下，
+  直接用文件管理器或 `scp` 取 `lztsettingsframework.log`。
+- **LiveContainer**：日志在**内层 app** 的 `Documents` 目录，
+  路径比直装多一层容器目录（形如
+  `Documents/Data/Application/<内层UUID>/Documents/`），
+  顺着目录找同名文件即可。
+
+反馈问题时请附上：游戏版本、宿主环境（直装 / LiveContainer）、设备与系统
+版本、复现步骤，以及出问题前后的日志片段。日志里可能含包名与内存地址，
+公开前请自行脱敏。
+
+完整的日志说明（两端输出通道、日志种类、崩溃记录、排查对照表）见
+[`docs/日志系统.md`](../docs/日志系统.md)；安卓侧的位置、logcat tag 与归档
+策略见仓库根目录 [`README.md`](../README.md) 第十节。
+
+---
+
+## 八、已知限制
 
 - **armv7 不再产出**：打包时只抽 arm64 切片。iOS 侧只面向 arm64。
 - **3 个站点按条件安装**：视角相关站点在运行时才注册，
   因此日志里的实际启用数通常是 19~20，而非 manifest 的 22。
+  若实际启用数掉到个位数，说明 gate 区没被找到或被覆盖。
 - **LiveContainer 下语言表可能为空**：容器的沙盒路径多一层嵌套，
   沙盒重定向的兜底逻辑失效时，游戏找不到 CDN 目录，语言表加载失败。
   企业签名环境下无此问题。
@@ -256,7 +336,7 @@ load command 数量的差异（79 vs 81）来自容器注入自身追加的加�
 
 ---
 
-## 八、授权
+## 九、授权
 
 本项目的源代码与文档采用 [PolyForm Noncommercial License 1.0.0](../LICENSE)，
 仅允许非商业用途。And64InlineHook 适用 MIT License。游戏本体、游戏资源与

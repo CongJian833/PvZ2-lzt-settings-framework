@@ -1,12 +1,12 @@
 #!/var/jb/bin/sh
 # ============================================================
-# func1.sh — 从底包生成可安装 ipa（带静态 gate 站点）
+# pack.sh — 从底包生成可安装 ipa（带静态 gate 站点）
 #
 # 用法：
-#   OUTNAME=xxx.ipa MANIFEST=/tmp/m_I.txt TNAME=build_X sh /tmp/func1.sh
+#   OUTNAME=xxx.ipa MANIFEST=<站点表> sh tools/pack.sh
 #
 # 流程：抽 arm64 -> 注入 dylib -> 打 gate 站点 -> 校验静态补丁
-#       -> 重签 -> 合回 fat -> 打包
+#       -> 重签 -> 打包
 # ============================================================
 set -e
 
@@ -18,7 +18,7 @@ BASE="$AG/安装包/原版+Clean/PvZ 2_Clean"
 OUTDIR="$AG/安装包"
 
 OUTNAME=${OUTNAME:-PvZ2_test.ipa}
-MANIFEST=${MANIFEST:-$D/backup/v43_banner/manifest.txt}
+MANIFEST=${MANIFEST:-$D/backup/v52_scanfixed/mFinal.txt}
 TNAME=${TNAME:-build_tmp}
 W=/tmp/$TNAME
 

@@ -18,8 +18,8 @@
 //  偏移量配置 - 用户必填
 //
 //  使用说明：
-//    1. 用 IDA Pro 打开对应架构的 libPVZ2.so
-//    2. 按下方注释定位函数和字段偏移
+//    1. 找到目标版本游戏库里对应的函数与字段
+//    2. 按下方注释核对函数入口与字段访问模式
 //    3. 填入对应数值后即可编译
 //
 //  详细定位方法见 docs/offsets-guide.md（偏移量填写指南）。
@@ -29,7 +29,7 @@
 //  === ARM64 与 ARM32 偏移差异 ===
 //  ARM32 的 Board 结构体和 DisplayInfo 结构体与 ARM64 布局不同
 //  （指针宽度 4 vs 8 字节导致字段位置整体前移），所有偏移必须
-//  在对应架构的 IDB 中独立验证，不能直接套用。
+//  在两个架构上各自独立核对，不能直接套用。
 // ============================================================
 
 // ============================================================
@@ -45,7 +45,7 @@ constexpr uint32_t SETTINGS_FIRST_DYNAMIC_ID   = 30; // 框架动态 id 分配�
 // ============================================================
 //  ARM64 (arm64-v8a) 偏移
 //
-//  IDA 验证方法：
+//  核对方法（每个常量都在下方注释里写明依据）：
 //    - BoardLayout_ApplyZoom @ 0xADEB80：函数内访问 Board+0x460(float)/0x46C~0x478(int)
 //    - BoardZoom2 @ 0xADEDE0：函数内访问 Board+0x460(float)，长屏检测读 g_DisplayInfo+0x88/0x8C
 //    - g_DisplayInfo @ 0x26BFC10：指针全局，解引用得到 DisplayInfo 对象
@@ -107,7 +107,7 @@ constexpr uintptr_t SETTINGS_CONTENT_ALLOC = 0xF0;        // content operator ne
 constexpr uintptr_t SETTINGS_CONTAINER_ALLOC = 0xD0;      // prompt 文本容器分配大小（ARM32=0x94）
 
 // --- B 方案：Sexy::ScrollWidget 可滚动内容容器（v7.26 起，仅 ARM64）---
-// 逆向来源（IDA，同 9.8.1 基址）：
+// 来源（同为 9.8.1 基址）：
 //   vtable off_260BFF0(vtab+416 layout=sub_16EF39C, vtab+88 AddChild=sub_1699E20)
 //   单参构造 sub_16EE994；双参构造 sub_16EE71C；对象 operator new 大小 0x1E8(=488)。
 //   layout(sub_16EF39C) 以内容尺寸(+312/+316) 对比视口(a1宽高-内边距-滚动条宽)
@@ -149,7 +149,7 @@ constexpr uintptr_t OFF_TextLabelCreate = 0x1714EE0;   // sub_1714EE0(...)：创
 constexpr uintptr_t OFF_TextContainerAdd = 0x16AC798;  // sub_16AC798(container,label)：标签加入容器
 
 // --- Board 对象字段偏移 ---
-// 验证：反编译 OFF_BoardZoom，观察其读写的 Board 成员偏移
+// 核对：OFF_BoardZoom 内读写的 Board 成员偏移
 constexpr uintptr_t BOARD_17  = 68;     // 0x044  X坐标偏移 (int, 坐标转换用: screenX = b281 + b280*(PPU*x - b281) + b17)
 constexpr uintptr_t BOARD_CAM_RENDER_X = BOARD_17; // v39：共享诊断/直写代码用别名（ARM32 为 board+0x24，见 ARM32 段）
 constexpr uintptr_t BOARD_270 = 1080;   // 0x438  种植偏移 (int, 进入 board[281] 参与坐标转换)
@@ -171,7 +171,7 @@ constexpr uintptr_t DISPLAYINFO_SCREEN_HEIGHT = 248;       // 0xF8  screenHeight
 constexpr uintptr_t DISPLAYINFO_BOARD         = 2472;      // 0x9A8 board 指针在 DisplayInfo 对象内偏移
 constexpr uintptr_t DISPLAYINFO_SCREEN_OFFSET = 1820;      // 0x71C screenOffset（BoardLayout_ApplyZoom 用）
 
-// --- 语言管理器（v3.3 IDA 实证：CDN 清单收集 sub_AC8418 与本地加载
+// --- 语言管理器（CDN 清单收集 sub_AC8418 与本地加载
 //     sub_11F475C 共用链路 [G]+0x7C8 → LangMgr，[LangMgr+0x1E4] 为
 //     当前语言 FourCC（大写 locale 打包，如 "EN-US"=0x454E5553），
 //     经 sub_16A8A4C "%c%c-%c%c" 转字符串后拼 "LawnStrings-%s" 文件名；
@@ -213,7 +213,7 @@ constexpr uintptr_t OFF_RESOURCE_BUFFER_INIT         = 0x1596A34;
 constexpr uintptr_t OFF_RESOURCE_BUFFER_DESTROY      = 0x1596A54;
 constexpr uintptr_t OFF_RESOURCE_OPEN                = 0x153EDD0;
 
-// --- PVZDB 热重载（v3.4 IDA 实证：CDN Apply 链路终点，运行期可调）---
+// --- PVZDB 热重载（CDN Apply 链路终点，运行期可调）---
 // sub_120AEFC(db, tableID, path) "PVZDB::LoadPackageForTableFromRTONFile"：
 //   路径先查内部归档失败后走 fopen("rb") 文件系统；对已加载表自动经
 //   sub_120C170 清理旧数据再装载 = 原生热替换语义。CDN Apply
@@ -331,7 +331,7 @@ constexpr uintptr_t UISCALE_VALUE              = 2432;     // 0x980 UIScale(floa
 constexpr uintptr_t OFF_NEWS_SELECT_LOCALE     = 0x145BE84; // sub_145BE84(entry, key)：取 LocalizedData[key]
 
 // --- 组件补丁：EAText 字形缓存 / 图鉴（见 components/README.md）---
-//   一、字形缓存：与 iOS 同构的「尺寸 + 页上限」成对补丁（iOS docs/GLYPH_CACHE_FIX.md）
+//   一、字形缓存：与 iOS 同构的「尺寸 + 页上限」成对补丁
 //       sub_1713384 按屏幕最小边选 512/1024/2048（CMP #0x401/#0x281），
 //       经 sub_17F3560(cache,a2,a3,a4) 构造，a4 写入 cache+0xA4（= 缓冲区大小）。
 //       实测（B 站教程 cv16512322）：该值 1→几乎无字、越大字越多、>2048 全白，
@@ -433,7 +433,7 @@ constexpr uintptr_t BOARD_SHAKE_VEL_Y  = 532;   // 0x214 震屏速度Y (float)
 // ============================================================
 //  ARM32 (armeabi-v7a / Thumb-2) 偏移
 //
-//  IDA 验证方法：
+//  核对方法：
 //    - BoardZoom @ 0x75D044 (sub_75D044)：函数内访问 Board+0x35C(float)/0x368~0x374(int)
 //      调用者 sub_75C9F8 先调 sub_75D044 再调 sub_75D2D8(BoardZoom2)
 //    - BoardZoom2 @ 0x75D2D8 (sub_75D2D8)：函数内访问 Board+0x35C(float)，长屏检测读 DisplayInfo+0x88/0x8C
@@ -509,9 +509,9 @@ constexpr uintptr_t OFF_G_UIScaleContext = 0x1E67CBC; // dword_1E67CBC：UIScale
 constexpr uintptr_t UISCALE_VALUE        = 1688;      // 0x698 uiScale(float) 值偏移（uiCtx 对象内）
 
 // ============================================================
-//  Settings UI 视角切换功能链（v32，全部 IDA 反编译验证）
+//  Settings UI 视角切换功能链（全部逐条核对验证）
 //
-//  定位方法：反编译 ARM32 DataSharing 页面函数 sub_6D4420
+//  定位方法：从 ARM32 DataSharing 页面函数 sub_6D4420 入手
 //  （对应 ARM64 sub_A4EA34）与 tab 注册外层 sub_6D1894
 //  （对应 ARM64 sub_A4D79C 的调用者），从调用链逐一映射：
 //    - sub_6D4420 开头：controller = *(*(page+148)+4)（ARM64 page+216/owner+8）

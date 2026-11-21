@@ -4,8 +4,9 @@
  * 若第 1 条指令是 PC 相对的（adrp/adr/b/bl/cbz/tbz/ldr literal），拒绝该站点，
  * 不做任何改写 —— 宁可少一个功能，也不产生不确定行为。
  *
- * gate 区放在 __TEXT 头部 slack（load command 之后、首个 section 之前），
- * 不新增段、不移动任何既有数据。
+ * gate 区放在 __TEXT 内首个 section 之前的 slack，不新增段、不移动任何既有数据。
+ * 位置必须与 load command 末尾保持 >= 4KB 间距：容器类宿主会向主程序追加
+ * 自己的 load command，紧贴 load command 的空白区会被覆盖。
  *
  * 每站点 48 字节：
  *   +0x00  adrp x16, slot_page        ; 取槽

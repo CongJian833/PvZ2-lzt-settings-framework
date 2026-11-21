@@ -9,9 +9,11 @@
 // 0x100000000 + 本表偏移（iOS 主程序为 PvZ2.app/PvZ2，非 dylib）。
 //
 // 来源：
-//   · 视角相关：本项目静态定位（adrp/add 交叉引用 + 字段访问模式比对）
-//   · 设置页相关：参考文档 docs/VIEW_ANGLE_代码分析.md（同为 9.8.1）
-//   · 所有地址均已用 llvm-objdump 验证为合法函数序言
+//   · 视角相关：静态定位（交叉引用 + 字段访问模式比对），见 iOS/FINDINGS.md
+//   · 设置页相关：从原版 Tab 注册链倒推，见 iOS/FINDINGS.md
+//   · 所有地址均已核对为合法函数序言
+//
+//  详细的定位方法与填写规范见 docs/offsets-guide.md。
 //
 // 注意：iOS 的字符串资源是 UTF-32LE 编码（每个字符占 4 字节），
 //       与 Android 的 UTF-16/UTF-8 不同，直接 grep ASCII 是找不到键的。
