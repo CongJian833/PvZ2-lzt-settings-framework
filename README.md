@@ -28,6 +28,16 @@ And64InlineHook 继续适用各自的 MIT License，游戏本体、`游戏库文
 [NOTICE](NOTICE)。由于附加了非商业限制，本项目属于源码可用项目，不使用 OSI
 定义下的“开源许可证”表述。
 
+
+---
+
+**平台文档**
+
+- **Android**（本文件）—— 运行时 inline hook，产出 APK
+- **[iOS](iOS/README.md)** —— 打包期静态跳板，产出 IPA
+
+两端共享同一套框架源码（`jni/`），差异只在平台层与注入方式。
+
 ## 项目概览
 
 lzt-settings-framework 直接运行在游戏进程中。它做两件事：向内注入
