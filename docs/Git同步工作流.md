@@ -231,6 +231,23 @@ $env:PYTHONIOENCODING="utf-8"
 - 输出 `ok` → 环境正常，检查网络
 - 报 `couldn't create signal pipe` → 处于受限沙箱，需完全访问权限
 
+### 8.1b 编译报 `unable to make temporary file: Permission denied`
+
+clang 无法写入 `%TEMP%`（受限环境下常见）。
+
+解决：把临时目录指到工作区内
+
+```powershell
+$wt = "C:\Users\Administrator\Desktop\workspace-lzt\.tmpbuild"
+New-Item -ItemType Directory -Force -Path $wt | Out-Null
+$env:TEMP = $wt; $env:TMP = $wt
+```
+
+然后再执行 `ndk-build`。
+
+判断依据：PowerShell 能往 `%TEMP%` 写文件、但 clang 报 Permission denied，
+说明是该进程的环境限制，不是磁盘权限。
+
 ### 8.2 `git` 命令找不到
 
 ```powershell
