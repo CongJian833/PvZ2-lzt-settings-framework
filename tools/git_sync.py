@@ -26,7 +26,7 @@ from pathlib import Path
 
 # 脚本位于 <仓库>/tools/，仓库根即 parents[1]
 REPO = Path(__file__).resolve().parents[1]
-BRANCH = "sync/android-baseline"
+BRANCH = "baseline"
 
 # 提交前要跑的静态测试（与归档脚本保持一致）
 TESTS = [
@@ -42,9 +42,13 @@ TESTS = [
 def git(*args: str, check: bool = True, capture: bool = True) -> subprocess.CompletedProcess:
     """执行 git 命令，自动设置非交互环境。"""
     env = {"GIT_TERMINAL_PROMPT": "0"}  # 禁止交互提示，失败即报错
-    cmd = ["git", *args]
+    # -c core.quotepath=false：让中文文件名正常显示而非 \344\270\255 转义
+    cmd = ["git", "-c", "core.quotepath=false", *args]
+    # encoding="utf-8"：subprocess 默认用系统编码（中文 Windows 为 GBK），
+    # 会让 git 输出的中文文件名变成乱码或替换字符。
     r = subprocess.run(cmd, cwd=REPO, capture_output=capture,
-                       text=True, errors="replace", env={**__import__("os").environ, **env})
+                       text=True, encoding="utf-8", errors="replace",
+                       env={**__import__("os").environ, **env})
     if check and r.returncode != 0:
         out = (r.stdout or "") + (r.stderr or "")
         raise SystemExit(f"git {' '.join(args)} 失败:\n{out.strip()}")

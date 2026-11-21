@@ -1,7 +1,7 @@
 # Git 同步工作流（Windows 侧）
 
 > 脚本：`tools/git_sync.py`
-> 适用：本机 Windows 环境，分支 `sync/android-baseline`
+> 适用：本机 Windows 环境，分支 `baseline`
 > 建立时间：2026-11-21
 
 ---
@@ -18,6 +18,21 @@
 | 中文提交信息被 PowerShell 加 BOM | 提交信息首字符异常（已踩过） |
 
 脚本把这些固化成流程，一条命令完成。
+
+---
+
+## 一、分支约定
+
+**只有一个工作分支：`baseline`**
+
+```
+origin/main       f4a7a6b   历史遗留，不参与双端同步（勿动）
+origin/baseline   b7fdfbd   唯一工作分支，Android + iOS 共用
+```
+
+沿革：原为 `sync/android-baseline` 与 `ios/baseline` 两条并行分支，
+2026-11-21 合并后删除 iOS 侧，并把名字从 `sync/android-baseline` 改为
+`baseline`（原名已名不副实，易误解为仅 Android）。
 
 ---
 
@@ -68,7 +83,7 @@ python tools/git_sync.py status
 ```
 === 仓库 ===
 路径: ...\PvZ2-lzt-settings-framework
-分支: sync/android-baseline
+分支: baseline
 
 === 提交 ===
   095793a docs: add dual-platform sync workflow for iOS handoff
@@ -91,7 +106,7 @@ python tools/git_sync.py sync -m "feat: 完成某项改动"
 
 1. **自检** —— 跑 6 项静态测试，任一失败即中止
 2. **提交** —— `git add -A` + `commit`
-3. **推送** —— `push origin sync/android-baseline`
+3. **推送** —— `push origin baseline`
 4. **拉取** —— `fetch` + `merge --ff-only`
 5. 若拉取后发现远程领先，再补一次推送
 
@@ -166,16 +181,16 @@ python tools/git_sync.py push
 此时手动选择：
 
 ```powershell
-git rebase origin/sync/android-baseline    # 把本地提交放到远程之后
+git rebase origin/baseline    # 把本地提交放到远程之后
 # 或
-git merge origin/sync/android-baseline     # 生成合并提交
+git merge origin/baseline     # 生成合并提交
 ```
 
 ### 5.3 想撤销刚才的提交
 
 ```powershell
 git reset --hard HEAD~1                        # 撤销本地
-git push --force-with-lease origin sync/android-baseline   # 同步到远程
+git push --force-with-lease origin baseline   # 同步到远程
 ```
 
 `--force-with-lease` 比 `--force` 安全：远程若有他人新提交会拒绝。
