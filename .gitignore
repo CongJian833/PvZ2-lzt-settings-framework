@@ -56,9 +56,6 @@ libPVZ2.so
 *.idb
 *.so.bak
 
-# ---- 大体积备份（本地保留，不入库）----
-iOS/backup/
-iOS/docs/LawnStrings-*.json
 
 # ---- 临时 ----
 *.log
@@ -77,3 +74,24 @@ iOS/tools/xref2
 # ---- 备份文件 ----
 *.bak
 tests/.pre-*
+# ---- 版本归档（入库，用于回溯与交接）----
+# iOS/backup/ 下的版本快照是必需的历史记录：
+#   · 每个 vXX_* 目录冻结了一次「真机验证通过」的完整源码状态
+#   · v52_scanfixed/mFinal.txt 是打包必需的 22 站点清单
+# 因此整个目录改为跟踪，仅排除以下体积大或敏感的内容。
+!iOS/backup/
+
+# 原始游戏二进制（版权敏感，且可由底包重新提取）
+iOS/backup/PvZ2.orig
+iOS/backup/PvZ2.orig.oldpkg
+iOS/backup/PvZ2.*
+
+# 开发期源码逐次快照（47 个同源文件，体积 6.8M，价值低于版本归档）
+iOS/backup/src/
+
+# 用户数据备份（个人存档，不入库）
+iOS/backup/No_Backup-backup.tar
+iOS/backup/No_Backup-*.tar.gz
+
+# 游戏资源与第三方分析文档（版权敏感，仅本地参考）
+iOS/docs/LawnStrings-*.json

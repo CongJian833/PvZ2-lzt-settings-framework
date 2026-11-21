@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>application-identifier</key>
+	<string>4399EL96SK.com.popcap.ios.PvZ2</string>
+	<key>aps-environment</key>
+	<string>production</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>RZKWAK3484</string>
+	<key>com.apple.developer.ubiquity-container-identifiers</key>
+	<array>
+		<string>RZKWAK3484.com.popcap.ios.PvZ2</string>
+	</array>
+	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
+	<string>RZKWAK3484.com.popcap.ios.PvZ2</string>
+	<key>com.apple.private.set-exception-port</key>
+	<true/>
+	<key>com.apple.security.get-movable-control-port</key>
+	<true/>
+	<key>get-task-allow</key>
+	<true/>
+	<key>jb.pmap_cs.custom_trust</key>
+	<string>PMAP_CS_APP_STORE</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>4399EL96SK.com.popcap.ios.PvZ2</string>
+		<string>4399EL96SK.PopCapSharing</string>
+		<string>4399EL96SK.com.popcap.ios.PvZ2</string>
+		<string>com.apple.token</string>
+	</array>
+</dict>
+</plist>
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>application-identifier</key>
+	<string>4399EL96SK.com.popcap.ios.PvZ2</string>
+	<key>aps-environment</key>
+	<string>production</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>RZKWAK3484</string>
+	<key>com.apple.developer.ubiquity-container-identifiers</key>
+	<array>
+		<string>RZKWAK3484.com.popcap.ios.PvZ2</string>
+	</array>
+	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
+	<string>RZKWAK3484.com.popcap.ios.PvZ2</string>
+	<key>com.apple.private.set-exception-port</key>
+	<true/>
+	<key>com.apple.security.get-movable-control-port</key>
+	<true/>
+	<key>get-task-allow</key>
+	<true/>
+	<key>jb.pmap_cs.custom_trust</key>
+	<string>PMAP_CS_APP_STORE</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>4399EL96SK.com.popcap.ios.PvZ2</string>
+		<string>4399EL96SK.PopCapSharing</string>
+		<string>4399EL96SK.com.popcap.ios.PvZ2</string>
+		<string>com.apple.token</string>
+	</array>
+</dict>
+</plist>
