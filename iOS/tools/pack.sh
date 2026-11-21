@@ -102,7 +102,7 @@ chmod 755 "$APP/Frameworks/liblztsettingsframework.dylib"
 if llvm-otool-16 -arch arm64 -L "$WORK" 2>/dev/null | grep -q liblztsettingsframework.dylib; then
     echo "   已有加载项，跳过"
 else
-    "$D/build/ldcmd_add" "$WORK" "@executable_path/Frameworks/liblztsettingsframework.dylib"
+    "$D/tools/ldcmd_add" "$WORK" "@executable_path/Frameworks/liblztsettingsframework.dylib"
     echo "   已添加 LC_LOAD_DYLIB"
 fi
 
@@ -110,7 +110,7 @@ if [ "$SKIP_GATE" = "1" ]; then
     echo "== [3/6] 跳过静态 gate 站点（运行时 hook 模式）=="
 else
     echo "== [3/6] 打静态 gate 站点 =="
-    "$D/build/lztgate" "$WORK" "$MANIFEST" || { echo "!! lztgate 失败"; exit 1; }
+    "$D/tools/lztgate" "$WORK" "$MANIFEST" || { echo "!! lztgate 失败"; exit 1; }
 fi
 
 echo "== [4/6] 主程序静态补丁 =="
