@@ -18,7 +18,7 @@ namespace lzt_resource {
 
 // 构建标识（随诊断日志输出）；日志门统一为 lzt_settings_framework_config.h 的
 // LZT_DBG_LOG（v7.37 起全工程一套：Release 静默、Debug 保留）。
-[[maybe_unused]] static const char kLanguageResourceBuildTag[] = "LANGUAGE-V2.1.0-MODULE-TIDY";
+[[maybe_unused]] static const char kLanguageResourceBuildTag[] = "LANGUAGE-V" LZT_VERSION_STRING "-MODULE-TIDY";
 
 #if LZT_PLATFORM_IOS
 // iOS 平台实现（见 iOS/src/lzt_main_ios.cpp）：按 RSB 名字取记录原始字节。

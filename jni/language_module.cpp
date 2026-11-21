@@ -1737,7 +1737,7 @@ extern "C" void language_locale_bootstrap(void) {
 __attribute__((constructor)) void language_locale_bootstrap() {
 #endif
     lzt_core::log_write("Language module bootstrap: build=%s mode=%s",
-                        "LANGUAGE-V2.1.0-MODULE-TIDY", lzt_config::kBuildMode);
+                        "LANGUAGE-V" LZT_VERSION_STRING "-MODULE-TIDY", lzt_config::kBuildMode);
     lang_table_ensure();
     // 按标志文件记录的当前语言，预先加载 LawnStrings 文本表（纯文件读取，
     // 不依赖游戏基址），使设置页首次构建即能显示正确语言的文本。

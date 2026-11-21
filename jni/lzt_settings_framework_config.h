@@ -7,7 +7,16 @@
 // false：正式版，仅保留运行与异常所需日志。
 // true ：Debug 版，额外安装纯诊断 Hook、启动采样线程并输出详细轨迹。
 // 交付源码必须恢复为 false；build_variants.py 只切换这一处。
+//
+// ---- 项目版本号（单一来源）----
+// Android 与 iOS 共用同一份共享源码，构建标识统一取这里，避免多处字面量漂移。
+// Release 节奏以 Android 侧为准（与 GitHub Releases 的 Tag 一致）；
+// iOS 侧随同一源码树构建，不单独编号。
+#define LZT_VERSION_STRING "3.0.0"
+
 namespace lzt_config {
+inline constexpr const char* kProjectVersion = LZT_VERSION_STRING;
+
 inline constexpr bool kDebugMode = false;   // Debug 版诊断 hooks 存在启动期崩溃（AEF69C 等
                                             // 热路径遗留工具），独立问题，待后续专项排查
 inline constexpr const char* kBuildMode = kDebugMode ? "DEBUG" : "RELEASE";

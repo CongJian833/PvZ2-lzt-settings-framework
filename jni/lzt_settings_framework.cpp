@@ -2790,7 +2790,8 @@ __attribute__((constructor)) void settingsframework_init() {
 
         // 安装两个 hook（BoardZoom2 + BoardZoom）
         // applyHooks 内部用 get_lib_base_stable 获取稳定基址
-        log_write("BUILD v2.1.0-SETTINGS-FRAMEWORK mode=%s debug=%d; Settings UI migrated to lzt_settings framework",
+        log_write("BUILD v%s-SETTINGS-FRAMEWORK mode=%s debug=%d; Settings UI migrated to lzt_settings framework",
+                lzt_config::kProjectVersion,
                   lzt_config::kBuildMode, lzt_config::kDebugMode ? 1 : 0);
         // 框架模块注册（纯入表；须在 engine_install 之前完成）。
         // 注册顺序决定动态 id 分配顺序：language=30，view_angle=33。
