@@ -158,8 +158,18 @@ Android/jni/               # 共享源码（框架层/业务模块），平台�
    （追加写；主日志每次启动被覆盖，早期多次丢失现场）
 7. **`- fileoff`**：`linkedit_base = slide + __LINKEDIT.vmaddr - fileoff`，
    漏了会让符号表全部错位。
-8. 本机工具缺失：无 awk / python / otool；用 llvm-* 系列替代；
-   `rm -rf` 被安全策略拦截，需换写法。
+8. 本机工具缺失与补充（2026-11-21 更新）：
+   - 原缺 awk / otool / python3 / unzip；用 llvm-* 系列替代。
+   - **python3 已装**（3.9.9，来自 apt.procurs.us），`tests/*.py` 可直接跑；
+     装法：`apt-get install -y --no-install-recommends python3`。
+   - **unzip 已装**（6.00），IPA 的列表与完整性校验可用：
+     `unzip -l x.ipa` / `unzip -t x.ipa`。
+   - **`zip -T` 永远失败**，报 “could not spawn unzip”——本机 zip 无法 fork
+     子进程（与 git 无法 fork 带参数外部命令同源）。校验一律用 `unzip -t`。
+   - `zip` 无 `-l`；列表用 `unzip -l` 或 `zip -sf`。
+   - `rm -rf` 被安全策略拦截，需换写法（`rm -rf` 在部分路径可用，视位置而定）。
+   - 仍无 awk；文本取列用 `cut`，注意 `unzip -v` 输出行首有空格，
+     取列前先 `sed 's/^ *//'`，否则字段会错位。
 
 ## 七、调试手段（已验证可用）
 
